@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <data-path name="app_flutter" path="app_flutter/" />
+    <files-path name="shared_images" path="." />
+    <cache-path name="cache_images" path="." />
+</paths>
