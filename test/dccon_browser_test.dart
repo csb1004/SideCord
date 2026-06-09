@@ -83,6 +83,43 @@ void main() {
     );
   });
 
+  test('loadPopular parses jsonp ranking packages', () async {
+    final client = DcconClient(
+      client: MockClient((request) async {
+        if (request.url.host == 'json2.dcinside.com' &&
+            request.url.path == '/json1/dccon_day_top100.php') {
+          return http.Response(
+            '''
+            cb([
+              {
+                "package_idx": "171367",
+                "title": "밤우 스피키콘 2",
+                "nick_name": "밤우",
+                "img": "//dcimg5.dcinside.com/dccon.php?no=thumb_path"
+              }
+            ])
+            ''',
+            200,
+            headers: {'content-type': 'application/javascript; charset=utf-8'},
+          );
+        }
+        fail('Unexpected request: ${request.method} ${request.url}');
+      }),
+    );
+    addTearDown(client.close);
+
+    final packages = await client.loadPopular(DcconListMode.daily);
+
+    expect(packages, hasLength(1));
+    expect(packages.single.id, '171367');
+    expect(packages.single.title, '밤우 스피키콘 2');
+    expect(packages.single.seller, '밤우');
+    expect(
+      packages.single.thumbnailUrl,
+      'https://dcimg5.dcinside.com/dccon.php?no=thumb_path',
+    );
+  });
+
   test('loadDetail posts session token and maps icons', () async {
     var postedSessionToken = '';
     var postedCookieHeader = '';

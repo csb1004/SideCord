@@ -3,6 +3,41 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+enum DcconListMode {
+  latest('latest', '신규 디시콘', ''),
+  daily(
+    'daily',
+    '일간 인기 디시콘',
+    'https://json2.dcinside.com/json1/dccon_day_top100.php',
+  ),
+  weekly(
+    'weekly',
+    '주간 인기 디시콘',
+    'https://json2.dcinside.com/json1/dccon_week_top100.php',
+  ),
+  monthly(
+    'monthly',
+    '월간 인기 디시콘',
+    'https://json2.dcinside.com/json1/dccon_month_top100.php',
+  );
+
+  const DcconListMode(this.storageValue, this.label, this.popularUrl);
+
+  final String storageValue;
+  final String label;
+  final String popularUrl;
+
+  bool get isPopular => popularUrl.isNotEmpty;
+
+  static DcconListMode fromStorage(String? value) {
+    for (final mode in values) {
+      if (mode.storageValue == value) return mode;
+    }
+    return DcconListMode.daily;
+  }
+}
 
 class DcconPackage {
   const DcconPackage({
@@ -88,15 +123,34 @@ class DcconClient {
   final http.Client _client;
   final Map<String, String> _cookies = {};
 
+  Future<List<DcconPackage>> loadPackages(DcconListMode mode) async {
+    if (mode.isPopular) {
+      return loadPopular(mode);
+    }
+    return loadLatest();
+  }
+
   Future<List<DcconPackage>> loadLatest() async {
     final response = await _get('/new/1');
     return _parsePackages(_decodeBody(response));
   }
 
+  Future<List<DcconPackage>> loadPopular(DcconListMode mode) async {
+    if (!mode.isPopular) return loadLatest();
+    final response = await _client.get(
+      Uri.parse(mode.popularUrl),
+      headers: _headers(),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('인기 디시콘 목록을 불러오지 못했습니다.');
+    }
+    return _parsePopularPackages(_decodeBody(response));
+  }
+
   Future<List<DcconPackage>> search(String query) async {
     final trimmed = query.trim();
     if (trimmed.isEmpty) {
-      return loadLatest();
+      return loadPackages(DcconListMode.daily);
     }
 
     final encoded = Uri.encodeComponent(trimmed);
@@ -224,6 +278,47 @@ class DcconClient {
     return packages;
   }
 
+  List<DcconPackage> _parsePopularPackages(String body) {
+    final decoded = jsonDecode(_stripJsonp(body));
+    if (decoded is! List) return const [];
+
+    final packages = <DcconPackage>[];
+    final seenIds = <String>{};
+    for (final item in decoded) {
+      if (item is! Map<String, dynamic>) continue;
+      final id = item['package_idx']?.toString().trim() ?? '';
+      if (id.isEmpty || !seenIds.add(id)) continue;
+
+      final title = _cleanText(item['title']?.toString() ?? '');
+      final seller = _cleanText(
+        item['nick_name']?.toString() ?? item['seller_name']?.toString() ?? '',
+      );
+      final thumbnail = _absoluteUrl(item['img']?.toString() ?? '');
+      if (title.isEmpty && thumbnail.isEmpty) continue;
+
+      packages.add(
+        DcconPackage(
+          id: id,
+          title: title.isEmpty ? '디시콘 $id' : title,
+          seller: seller,
+          thumbnailUrl: thumbnail,
+        ),
+      );
+    }
+
+    return packages;
+  }
+
+  String _stripJsonp(String body) {
+    final trimmed = body.trim();
+    final start = trimmed.indexOf('(');
+    final end = trimmed.lastIndexOf(')');
+    if (start >= 0 && end > start) {
+      return trimmed.substring(start + 1, end);
+    }
+    return trimmed;
+  }
+
   Map<String, String> _headers({bool ajax = false}) {
     final headers = <String, String>{
       'User-Agent': userAgent,
@@ -308,15 +403,18 @@ class DcconBrowserPage extends StatefulWidget {
 }
 
 class _DcconBrowserPageState extends State<DcconBrowserPage> {
+  static const String _modePrefKey = 'dccon_list_mode';
+
   final DcconClient _client = DcconClient();
   final TextEditingController _searchController = TextEditingController();
   late Future<List<DcconPackage>> _packagesFuture;
   String _activeQuery = '';
+  DcconListMode _selectedMode = DcconListMode.daily;
 
   @override
   void initState() {
     super.initState();
-    _packagesFuture = _client.loadLatest();
+    _packagesFuture = _loadInitialPackages();
   }
 
   @override
@@ -332,8 +430,28 @@ class _DcconBrowserPageState extends State<DcconBrowserPage> {
     setState(() {
       _activeQuery = query;
       _packagesFuture = query.isEmpty
-          ? _client.loadLatest()
+          ? _client.loadPackages(_selectedMode)
           : _client.search(query);
+    });
+  }
+
+  Future<List<DcconPackage>> _loadInitialPackages() async {
+    final prefs = await SharedPreferences.getInstance();
+    _selectedMode = DcconListMode.fromStorage(prefs.getString(_modePrefKey));
+    return _client.loadPackages(_selectedMode);
+  }
+
+  Future<void> _selectMode(DcconListMode mode) async {
+    if (_selectedMode == mode && _activeQuery.isEmpty) return;
+    _searchController.clear();
+    FocusScope.of(context).unfocus();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_modePrefKey, mode.storageValue);
+    if (!mounted) return;
+    setState(() {
+      _selectedMode = mode;
+      _activeQuery = '';
+      _packagesFuture = _client.loadPackages(mode);
     });
   }
 
@@ -357,6 +475,9 @@ class _DcconBrowserPageState extends State<DcconBrowserPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final title = _activeQuery.isEmpty
+        ? _selectedMode.label
+        : '"$_activeQuery" 검색 결과';
     return Scaffold(
       appBar: AppBar(
         title: const Text('디시콘'),
@@ -398,12 +519,24 @@ class _DcconBrowserPageState extends State<DcconBrowserPage> {
               children: [
                 Expanded(
                   child: Text(
-                    _activeQuery.isEmpty ? '신규 디시콘' : '"$_activeQuery" 검색 결과',
+                    title,
                     style: theme.textTheme.titleSmall?.copyWith(
                       fontWeight: FontWeight.w700,
                     ),
                   ),
                 ),
+                if (_activeQuery.isEmpty)
+                  PopupMenuButton<DcconListMode>(
+                    tooltip: '목록 변경',
+                    icon: const Icon(Icons.format_list_bulleted),
+                    initialValue: _selectedMode,
+                    onSelected: _selectMode,
+                    itemBuilder: (context) => [
+                      for (final mode in DcconListMode.values)
+                        PopupMenuItem(value: mode, child: Text(mode.label)),
+                    ],
+                  ),
+                const SizedBox(width: 4),
                 FilledButton.tonalIcon(
                   onPressed: _runSearch,
                   icon: const Icon(Icons.search, size: 18),

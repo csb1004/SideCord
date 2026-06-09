@@ -154,6 +154,7 @@ class MainActivity : FlutterActivity() {
 							val iconPath = call.argument<String>("iconPath")
 							val borderDp = call.argument<Double>("borderDp") ?: 10.0
 							val thumbDp = call.argument<Double>("thumbDp") ?: 64.0
+							val buttonEnabled = call.argument<Boolean>("buttonEnabled") ?: true
 							val fastMs = (call.argument<Number>("fastMs")?.toLong() ?: 300L)
 							val slowMs = (call.argument<Number>("slowMs")?.toLong() ?: 4000L)
 							val prefs = getSharedPreferences("FlutterSharedPreferences", android.content.Context.MODE_PRIVATE)
@@ -162,6 +163,7 @@ class MainActivity : FlutterActivity() {
 								.putString("flutter.overlay_icon_path", iconPath)
 								.putFloat("flutter.overlay_border_dp", borderDp.toFloat())
 								.putFloat("flutter.overlay_thumb_dp", thumbDp.toFloat())
+								.putBoolean("flutter.overlay_button_enabled", buttonEnabled)
 								.putLong("flutter.monitor_fast_ms", fastMs)
 								.putLong("flutter.monitor_slow_ms", slowMs)
 								.apply()

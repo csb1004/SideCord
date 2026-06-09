@@ -29,6 +29,9 @@ class MyApp extends StatelessWidget {
 
 enum FolderType { images, texts }
 
+const String recentFolderName = '최근 사용';
+const int recentFolderLimit = 100;
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -36,19 +39,20 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final ImagePicker _imagePicker = ImagePicker();
   Map<String, List<String>> _imageFolders = {};
   Map<String, List<String>> _textFolders = {};
   List<String> _imageFolderOrder = [];
   List<String> _textFolderOrder = [];
-  String _currentImageFolder = '기본';
-  String _currentTextFolder = '기본';
+  String _currentImageFolder = recentFolderName;
+  String _currentTextFolder = recentFolderName;
   static const platform = MethodChannel('com.yourapp/overlay');
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     _loadFolderData().then((_) {
       if (mounted) {
@@ -59,8 +63,16 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _stopMonitoring();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _loadFolderData();
+    }
   }
 
   Future<void> _initializeOverlay() async {
@@ -134,27 +146,29 @@ class _HomePageState extends State<HomePage> {
       if (_imageFolders.isEmpty) {
         final legacy = prefs.getStringList('saved_images') ?? [];
         if (legacy.isNotEmpty) {
-          _imageFolders['기본'] = List<String>.from(legacy);
+          _imageFolders[recentFolderName] = List<String>.from(legacy);
         }
       }
 
       if (_textFolders.isEmpty) {
         final legacy = prefs.getStringList('saved_texts') ?? [];
         if (legacy.isNotEmpty) {
-          _textFolders['기본'] = List<String>.from(legacy);
+          _textFolders[recentFolderName] = List<String>.from(legacy);
         }
       }
 
       _ensureDefaultFolders();
       _normalizeFolderOrder();
 
-      _currentImageFolder = prefs.getString('current_image_folder') ?? '기본';
-      _currentTextFolder = prefs.getString('current_text_folder') ?? '기본';
+      _currentImageFolder =
+          prefs.getString('current_image_folder') ?? recentFolderName;
+      _currentTextFolder =
+          prefs.getString('current_text_folder') ?? recentFolderName;
       if (!_imageFolders.containsKey(_currentImageFolder)) {
-        _currentImageFolder = '기본';
+        _currentImageFolder = recentFolderName;
       }
       if (!_textFolders.containsKey(_currentTextFolder)) {
-        _currentTextFolder = '기본';
+        _currentTextFolder = recentFolderName;
       }
 
       if (mounted) {
@@ -170,8 +184,21 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _ensureDefaultFolders() {
-    _imageFolders.putIfAbsent('기본', () => []);
-    _textFolders.putIfAbsent('기본', () => []);
+    _migrateDefaultFolder(_imageFolders);
+    _migrateDefaultFolder(_textFolders);
+    _imageFolders.putIfAbsent(recentFolderName, () => []);
+    _textFolders.putIfAbsent(recentFolderName, () => []);
+  }
+
+  void _migrateDefaultFolder(Map<String, List<String>> folders) {
+    final legacy = folders.remove('기본');
+    if (legacy == null || legacy.isEmpty) return;
+    final recent = folders.putIfAbsent(recentFolderName, () => []);
+    for (final item in legacy) {
+      if (!recent.contains(item)) {
+        recent.add(item);
+      }
+    }
   }
 
   void _normalizeFolderOrder() {
@@ -181,12 +208,12 @@ class _HomePageState extends State<HomePage> {
     if (_textFolderOrder.isEmpty) {
       _textFolderOrder = _textFolders.keys.toList();
     }
-    if (!_imageFolderOrder.contains('기본')) {
-      _imageFolderOrder.insert(0, '기본');
-    }
-    if (!_textFolderOrder.contains('기본')) {
-      _textFolderOrder.insert(0, '기본');
-    }
+    _imageFolderOrder.remove('기본');
+    _textFolderOrder.remove('기본');
+    _imageFolderOrder.remove(recentFolderName);
+    _textFolderOrder.remove(recentFolderName);
+    _imageFolderOrder.insert(0, recentFolderName);
+    _textFolderOrder.insert(0, recentFolderName);
     _imageFolderOrder = _imageFolderOrder
         .where((name) => _imageFolders.containsKey(name))
         .toList();
@@ -204,6 +231,9 @@ class _HomePageState extends State<HomePage> {
       }
     }
   }
+
+  bool _isProtectedFolder(String name) =>
+      name == recentFolderName || name == '기본';
 
   Map<String, List<String>> _decodeFolderMap(String? jsonStr) {
     if (jsonStr == null || jsonStr.isEmpty) return {};
@@ -290,6 +320,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> _createFolder(FolderType type, String name) async {
     final trimmed = name.trim();
     if (trimmed.isEmpty) return;
+    if (_isProtectedFolder(trimmed)) return;
     setState(() {
       if (type == FolderType.images) {
         _imageFolders.putIfAbsent(trimmed, () => []);
@@ -318,7 +349,7 @@ class _HomePageState extends State<HomePage> {
   ) async {
     final trimmed = newName.trim();
     if (trimmed.isEmpty || trimmed == oldName) return;
-    if (oldName == '기본') return;
+    if (_isProtectedFolder(oldName) || _isProtectedFolder(trimmed)) return;
     setState(() {
       if (type == FolderType.images) {
         final items = _imageFolders.remove(oldName) ?? [];
@@ -351,27 +382,27 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _deleteFolder(FolderType type, String name) async {
-    if (name == '기본') return;
+    if (_isProtectedFolder(name)) return;
     setState(() {
       if (type == FolderType.images) {
         _imageFolders.remove(name);
-        _imageFolders.putIfAbsent('기본', () => []);
+        _imageFolders.putIfAbsent(recentFolderName, () => []);
         if (_currentImageFolder == name) {
-          _currentImageFolder = '기본';
+          _currentImageFolder = recentFolderName;
         }
         _imageFolderOrder.remove(name);
-        if (!_imageFolderOrder.contains('기본')) {
-          _imageFolderOrder.insert(0, '기본');
+        if (!_imageFolderOrder.contains(recentFolderName)) {
+          _imageFolderOrder.insert(0, recentFolderName);
         }
       } else {
         _textFolders.remove(name);
-        _textFolders.putIfAbsent('기본', () => []);
+        _textFolders.putIfAbsent(recentFolderName, () => []);
         if (_currentTextFolder == name) {
-          _currentTextFolder = '기본';
+          _currentTextFolder = recentFolderName;
         }
         _textFolderOrder.remove(name);
-        if (!_textFolderOrder.contains('기본')) {
-          _textFolderOrder.insert(0, '기본');
+        if (!_textFolderOrder.contains(recentFolderName)) {
+          _textFolderOrder.insert(0, recentFolderName);
         }
       }
     });
@@ -385,6 +416,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _addImagesToFolder(String folderName) async {
     if (kIsWeb) return;
+    if (_isProtectedFolder(folderName)) return;
     try {
       final List<XFile> images = await _imagePicker.pickMultiImage();
       if (images.isEmpty) return;
@@ -525,7 +557,7 @@ class _HomePageState extends State<HomePage> {
 
   String _dcconFolderName(DcconPackage package) {
     final title = package.title.replaceAll(RegExp(r'\s+'), ' ').trim();
-    if (title.isNotEmpty) return title;
+    if (title.isNotEmpty && !_isProtectedFolder(title)) return title;
     return '디시콘 ${package.id}';
   }
 
@@ -582,6 +614,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _addTextToFolder(String folderName, String text) async {
+    if (_isProtectedFolder(folderName)) return;
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
     final list = _textFolders[folderName] ?? [];
@@ -609,6 +642,7 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) return;
     final imagePaths = _imageFolders[name] ?? [];
     final texts = _textFolders[name] ?? [];
+    final readOnly = _isProtectedFolder(name);
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => FolderDetailPage(
@@ -616,6 +650,7 @@ class _HomePageState extends State<HomePage> {
           folderName: name,
           imagePaths: imagePaths,
           texts: texts,
+          readOnly: readOnly,
           onAddImages: () => _addImagesToFolder(name),
           onAddText: (text) => _addTextToFolder(name, text),
           onDeleteImages: (paths) => _deleteImagesFromFolder(name, paths),
@@ -643,6 +678,7 @@ class _HomePageState extends State<HomePage> {
     String folderName,
     List<String> paths,
   ) async {
+    if (_isProtectedFolder(folderName)) return;
     if (paths.isEmpty) return;
     final list = _imageFolders[folderName] ?? [];
     list.removeWhere(paths.contains);
@@ -668,6 +704,7 @@ class _HomePageState extends State<HomePage> {
     String? iconPath = prefs.getString('overlay_icon_path');
     double borderDp = prefs.getDouble('overlay_border_dp') ?? 10.0;
     double thumbDp = prefs.getDouble('overlay_thumb_dp') ?? 64.0;
+    bool overlayButtonEnabled = prefs.getBool('overlay_button_enabled') ?? true;
 
     if (!mounted) return;
     await showDialog(
@@ -691,10 +728,14 @@ class _HomePageState extends State<HomePage> {
                           File(iconPath!),
                           fit: BoxFit.cover,
                         );
-                        return ClipOval(child: image);
+                        return ClipRRect(
+                          borderRadius: BorderRadius.circular(18),
+                          child: image,
+                        );
                       }
                       final icon = const Icon(Icons.photo, size: 48);
-                      return ClipOval(
+                      return ClipRRect(
+                        borderRadius: BorderRadius.circular(18),
                         child: Container(
                           alignment: Alignment.center,
                           child: icon,
@@ -703,6 +744,22 @@ class _HomePageState extends State<HomePage> {
                     }(),
                   ),
                   const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          value: overlayButtonEnabled,
+                          onChanged: (value) {
+                            setDialogState(() {
+                              overlayButtonEnabled = value;
+                            });
+                          },
+                          title: const Text('옆 오버레이 버튼'),
+                        ),
+                      ),
+                    ],
+                  ),
                   Row(
                     children: [
                       const SizedBox(width: 44, child: Text('크기')),
@@ -815,6 +872,10 @@ class _HomePageState extends State<HomePage> {
                     await prefs.setDouble('overlay_size_dp', sizeDp);
                     await prefs.setDouble('overlay_border_dp', borderDp);
                     await prefs.setDouble('overlay_thumb_dp', thumbDp);
+                    await prefs.setBool(
+                      'overlay_button_enabled',
+                      overlayButtonEnabled,
+                    );
                     if (iconPath == null) {
                       await prefs.remove('overlay_icon_path');
                     } else {
@@ -826,6 +887,7 @@ class _HomePageState extends State<HomePage> {
                         'iconPath': iconPath,
                         'borderDp': borderDp,
                         'thumbDp': thumbDp,
+                        'buttonEnabled': overlayButtonEnabled,
                       });
                     }
                     if (context.mounted) {
@@ -917,8 +979,11 @@ class _HomePageState extends State<HomePage> {
                   ),
                 )
               : ReorderableListView.builder(
+                  buildDefaultDragHandles: false,
                   itemCount: names.length,
                   onReorder: (oldIndex, newIndex) {
+                    final draggedName = names[oldIndex];
+                    if (_isProtectedFolder(draggedName)) return;
                     setState(() {
                       if (newIndex > oldIndex) {
                         newIndex -= 1;
@@ -930,21 +995,26 @@ class _HomePageState extends State<HomePage> {
                       } else {
                         _textFolderOrder = List<String>.from(names);
                       }
+                      _normalizeFolderOrder();
                     });
                     _saveFolderOrders();
                   },
                   itemBuilder: (context, index) {
                     final name = names[index];
-                    final count = folders[name]?.length ?? 0;
-                    final isDefault = name == '기본';
+                    final items = folders[name] ?? const <String>[];
+                    final count = items.length;
+                    final isProtected = _isProtectedFolder(name);
                     return ListTile(
                       key: ValueKey(name),
+                      leading: _FolderPreview(type: type, items: items),
                       title: Text(name),
                       subtitle: Text('항목 $count'),
                       onTap: () => _openFolder(type, name),
-                      trailing: isDefault
-                          ? null
-                          : PopupMenuButton<String>(
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (!isProtected)
+                            PopupMenuButton<String>(
                               onSelected: (value) {
                                 if (value == 'rename') {
                                   _showRenameFolderDialog(type, name);
@@ -963,6 +1033,16 @@ class _HomePageState extends State<HomePage> {
                                 ),
                               ],
                             ),
+                          if (!isProtected)
+                            ReorderableDragStartListener(
+                              index: index,
+                              child: const Padding(
+                                padding: EdgeInsets.all(8),
+                                child: Icon(Icons.drag_handle),
+                              ),
+                            ),
+                        ],
+                      ),
                     );
                   },
                 ),
@@ -1061,6 +1141,43 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
+class _FolderPreview extends StatelessWidget {
+  const _FolderPreview({required this.type, required this.items});
+
+  final FolderType type;
+  final List<String> items;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final firstImage = type == FolderType.images ? _firstExistingImage() : null;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: SizedBox.square(
+        dimension: 48,
+        child: firstImage == null
+            ? ColoredBox(
+                color: theme.colorScheme.surfaceContainerHighest,
+                child: Icon(
+                  type == FolderType.images
+                      ? Icons.photo_library_outlined
+                      : Icons.notes_outlined,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              )
+            : Image.file(File(firstImage), fit: BoxFit.cover),
+      ),
+    );
+  }
+
+  String? _firstExistingImage() {
+    for (final path in items) {
+      if (File(path).existsSync()) return path;
+    }
+    return null;
+  }
+}
+
 class FolderDetailPage extends StatefulWidget {
   const FolderDetailPage({
     super.key,
@@ -1068,6 +1185,7 @@ class FolderDetailPage extends StatefulWidget {
     required this.folderName,
     required this.imagePaths,
     required this.texts,
+    required this.readOnly,
     required this.onAddImages,
     required this.onAddText,
     required this.onDeleteImages,
@@ -1079,6 +1197,7 @@ class FolderDetailPage extends StatefulWidget {
   final String folderName;
   final List<String> imagePaths;
   final List<String> texts;
+  final bool readOnly;
   final Future<void> Function() onAddImages;
   final Future<void> Function(String text) onAddText;
   final Future<void> Function(List<String> paths) onDeleteImages;
@@ -1113,7 +1232,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
               : '${_selectedImages.length} 선택됨',
         ),
         actions: [
-          if (isImages && _selectedImages.isNotEmpty)
+          if (isImages && _selectedImages.isNotEmpty && !widget.readOnly)
             IconButton(
               onPressed: _confirmDeleteSelected,
               icon: const Icon(Icons.delete),
@@ -1122,23 +1241,25 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
         ],
       ),
       body: isImages ? _buildImageGrid() : _buildTextList(),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () async {
-          if (isImages) {
-            await widget.onAddImages();
-            if (mounted) setState(() {});
-          } else {
-            final text = _textController.text.trim();
-            if (text.isNotEmpty) {
-              await widget.onAddText(text);
-              _textController.clear();
-              if (mounted) setState(() {});
-            }
-          }
-        },
-        tooltip: '추가',
-        child: const Icon(Icons.add),
-      ),
+      floatingActionButton: widget.readOnly
+          ? null
+          : FloatingActionButton(
+              onPressed: () async {
+                if (isImages) {
+                  await widget.onAddImages();
+                  if (mounted) setState(() {});
+                } else {
+                  final text = _textController.text.trim();
+                  if (text.isNotEmpty) {
+                    await widget.onAddText(text);
+                    _textController.clear();
+                    if (mounted) setState(() {});
+                  }
+                }
+              },
+              tooltip: '추가',
+              child: const Icon(Icons.add),
+            ),
     );
   }
 
@@ -1165,8 +1286,10 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
         final path = widget.imagePaths[index];
         final selected = _selectedImages.contains(path);
         return DragTarget<String>(
-          onWillAcceptWithDetails: (details) => details.data != path,
+          onWillAcceptWithDetails: (details) =>
+              !widget.readOnly && details.data != path,
           onAcceptWithDetails: (details) async {
+            if (widget.readOnly) return;
             final data = details.data;
             final fromIndex = widget.imagePaths.indexOf(data);
             if (fromIndex == -1) return;
@@ -1185,6 +1308,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
             );
             return LongPressDraggable<String>(
               data: path,
+              maxSimultaneousDrags: widget.readOnly ? 0 : 1,
               onDragUpdate: _handleImageDragUpdate,
               feedback: Material(
                 color: Colors.transparent,
@@ -1207,6 +1331,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
               ),
               child: GestureDetector(
                 onTap: () {
+                  if (widget.readOnly) return;
                   setState(() {
                     if (selected) {
                       _selectedImages.remove(path);
@@ -1353,17 +1478,20 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-          child: TextField(
-            controller: _textController,
-            decoration: const InputDecoration(
-              hintText: '텍스트 입력',
-              border: OutlineInputBorder(),
-              isDense: true,
-            ),
-            minLines: 1,
-            maxLines: 4,
-          ),
+          child: widget.readOnly
+              ? const SizedBox.shrink()
+              : TextField(
+                  controller: _textController,
+                  decoration: const InputDecoration(
+                    hintText: '텍스트 입력',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  minLines: 1,
+                  maxLines: 4,
+                ),
         ),
+        if (!widget.readOnly) const SizedBox(height: 0),
         Expanded(
           child: widget.texts.isEmpty
               ? Center(
@@ -1373,8 +1501,10 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                   ),
                 )
               : ReorderableListView.builder(
+                  buildDefaultDragHandles: !widget.readOnly,
                   itemCount: widget.texts.length,
                   onReorder: (oldIndex, newIndex) {
+                    if (widget.readOnly) return;
                     setState(() {
                       if (newIndex > oldIndex) {
                         newIndex -= 1;
@@ -1393,7 +1523,9 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      trailing: const Icon(Icons.drag_handle),
+                      trailing: widget.readOnly
+                          ? null
+                          : const Icon(Icons.drag_handle),
                     );
                   },
                 ),

@@ -3,6 +3,7 @@ package com.example.emotion_cord
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -23,6 +24,7 @@ import android.graphics.drawable.Animatable
 import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.provider.Settings
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -36,6 +38,7 @@ import android.widget.FrameLayout
 import android.widget.GridView
 import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
@@ -124,15 +127,25 @@ private class MovieGifDrawable(file: File) : Drawable(), Animatable {
     override fun isRunning(): Boolean = running
 }
 
+private data class OverlayFolderItem(
+    val name: String,
+    val count: Int,
+    val previewPath: String?
+)
+
 class OverlayService : Service() {
     companion object {
         const val ACTION_SHOW = "com.example.emotion_cord.action.SHOW_OVERLAY"
         const val ACTION_HIDE = "com.example.emotion_cord.action.HIDE_OVERLAY"
         const val ACTION_UPDATE_SETTINGS = "com.example.emotion_cord.action.UPDATE_SETTINGS"
+        const val ACTION_OPEN_GALLERY = "com.example.emotion_cord.action.OPEN_GALLERY"
+        const val ACTION_OPEN_APP = "com.example.emotion_cord.action.OPEN_APP"
         const val EXTRA_IMAGE_PATH = "extra_image_path"
         private const val CHANNEL_ID = "overlay_service"
         private const val CHANNEL_NAME = "Overlay Service"
         private const val NOTIFICATION_ID = 1102
+        private const val RECENT_FOLDER_NAME = "최근 사용"
+        private const val RECENT_FOLDER_LIMIT = 100
     }
 
     private var windowManager: WindowManager? = null
@@ -177,6 +190,14 @@ class OverlayService : Service() {
                 ACTION_UPDATE_SETTINGS -> {
                     applyOverlaySettings()
                 }
+                ACTION_OPEN_GALLERY -> {
+                    ensureForeground()
+                    showGalleryOverlay()
+                }
+                ACTION_OPEN_APP -> {
+                    ensureForeground()
+                    openHostApp()
+                }
             }
         } catch (e: Exception) {
             stopForeground(true)
@@ -212,6 +233,10 @@ class OverlayService : Service() {
             val folderLabel = galleryView!!.findViewById<TextView>(R.id.gallery_folder_label)
             val folderChange = galleryView!!.findViewById<TextView>(R.id.gallery_folder_change)
             val folderListView = galleryView!!.findViewById<ListView>(R.id.gallery_folder_list)
+            val selectionBar = galleryView!!.findViewById<View>(R.id.gallery_selection_bar)
+            val selectionCount = galleryView!!.findViewById<TextView>(R.id.gallery_selection_count)
+            val selectionClear = galleryView!!.findViewById<TextView>(R.id.gallery_selection_clear)
+            val selectionSend = galleryView!!.findViewById<TextView>(R.id.gallery_selection_send)
             gridView.isClickable = true
             gridView.isFocusable = true
             gridView.isFocusableInTouchMode = true
@@ -245,7 +270,17 @@ class OverlayService : Service() {
 
             val imageItems = mutableListOf<String>()
             val textItems = mutableListOf<String>()
-            val folderItems = mutableListOf<String>()
+            val folderItems = mutableListOf<OverlayFolderItem>()
+            val selectedImagePaths = linkedSetOf<String>()
+
+            fun updateSelectionUi() {
+                selectionBar.visibility = if (showPhotos && selectedImagePaths.isNotEmpty() && !showFolders) {
+                    View.VISIBLE
+                } else {
+                    View.GONE
+                }
+                selectionCount.text = "${selectedImagePaths.size}개 선택"
+            }
 
             gridView.adapter = object : BaseAdapter() {
                 override fun getCount(): Int = imageItems.size
@@ -258,6 +293,11 @@ class OverlayService : Service() {
                     val imageView = itemView.findViewById<ImageView>(R.id.gallery_item_image)
                     val path = imageItems[position]
                     val file = File(path)
+                    itemView.alpha = if (selectedImagePaths.contains(path)) 0.56f else 1.0f
+                    itemView.setBackgroundColor(
+                        if (selectedImagePaths.contains(path)) Color.argb(70, 44, 118, 255)
+                        else Color.TRANSPARENT
+                    )
                     if (file.exists()) {
                         val sizePx = getOverlayThumbPx()
                         loadImageIntoView(imageView, file, sizePx, sizePx)
@@ -271,7 +311,24 @@ class OverlayService : Service() {
 
             gridView.setOnItemClickListener { _, _, position, _ ->
                 val path = imageItems[position]
-                shareImageToDiscord(path)
+                if (selectedImagePaths.isEmpty()) {
+                    shareImageToDiscord(path)
+                } else {
+                    if (!selectedImagePaths.add(path)) {
+                        selectedImagePaths.remove(path)
+                    }
+                    updateSelectionUi()
+                    (gridView.adapter as BaseAdapter).notifyDataSetChanged()
+                }
+            }
+            gridView.setOnItemLongClickListener { _, _, position, _ ->
+                val path = imageItems[position]
+                if (!selectedImagePaths.add(path)) {
+                    selectedImagePaths.remove(path)
+                }
+                updateSelectionUi()
+                (gridView.adapter as BaseAdapter).notifyDataSetChanged()
+                true
             }
 
             val textAdapter = ArrayAdapter(
@@ -285,11 +342,64 @@ class OverlayService : Service() {
                 shareTextToDiscord(text)
             }
 
-            val folderAdapter = ArrayAdapter(
-                this,
-                android.R.layout.simple_list_item_1,
-                folderItems
-            )
+            val folderAdapter = object : BaseAdapter() {
+                override fun getCount(): Int = folderItems.size
+                override fun getItem(position: Int): Any = folderItems[position]
+                override fun getItemId(position: Int): Long = position.toLong()
+
+                override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+                    val context = parent?.context ?: this@OverlayService
+                    val item = folderItems[position]
+                    val density = resources.displayMetrics.density
+                    val row = (convertView as? LinearLayout) ?: LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        val padH = (12 * density).toInt()
+                        val padV = (8 * density).toInt()
+                        setPadding(padH, padV, padH, padV)
+
+                        val image = ImageView(context).apply {
+                            id = View.generateViewId()
+                            scaleType = ImageView.ScaleType.CENTER_CROP
+                            background = GradientDrawable().apply {
+                                shape = GradientDrawable.RECTANGLE
+                                cornerRadius = 10 * density
+                                setColor(Color.rgb(238, 238, 238))
+                            }
+                            clipToOutline = true
+                        }
+                        val imageParams = LinearLayout.LayoutParams(
+                            (48 * density).toInt(),
+                            (48 * density).toInt()
+                        )
+                        addView(image, imageParams)
+
+                        val text = TextView(context).apply {
+                            id = View.generateViewId()
+                            textSize = 15f
+                            setTextColor(Color.rgb(32, 32, 32))
+                            setPadding((12 * density).toInt(), 0, 0, 0)
+                        }
+                        val textParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                        addView(text, textParams)
+                    }
+
+                    val imageView = row.getChildAt(0) as ImageView
+                    val textView = row.getChildAt(1) as TextView
+                    textView.text = "${item.name} · ${item.count}개"
+                    val preview = item.previewPath
+                    if (!preview.isNullOrEmpty() && File(preview).exists()) {
+                        loadImageIntoView(imageView, File(preview), getOverlayThumbPx(), getOverlayThumbPx())
+                    } else {
+                        clearImageView(imageView)
+                        imageView.setImageResource(
+                            if (showPhotos) android.R.drawable.ic_menu_gallery
+                            else android.R.drawable.ic_menu_edit
+                        )
+                    }
+                    return row
+                }
+            }
             folderListView.adapter = folderAdapter
 
             fun refreshFolderList() {
@@ -298,7 +408,18 @@ class OverlayService : Service() {
                     if (showPhotos) "flutter.image_folders" else "flutter.text_folders",
                     if (showPhotos) "flutter.image_folder_order" else "flutter.text_folder_order"
                 )
-                folderItems.addAll(list)
+                folderItems.addAll(list.map { name ->
+                    val items = if (showPhotos) {
+                        loadImagePathsForFolder(name)
+                    } else {
+                        loadTextItemsForFolder(name)
+                    }
+                    OverlayFolderItem(
+                        name = name,
+                        count = items.size,
+                        previewPath = if (showPhotos) items.firstOrNull { File(it).exists() } else null
+                    )
+                })
                 folderAdapter.notifyDataSetChanged()
             }
 
@@ -315,6 +436,7 @@ class OverlayService : Service() {
                 }
                 (gridView.adapter as BaseAdapter).notifyDataSetChanged()
                 textAdapter.notifyDataSetChanged()
+                updateSelectionUi()
 
                 gridView.visibility = if (showPhotos && !showFolders) View.VISIBLE else View.GONE
                 textListView.visibility = if (!showPhotos && !showFolders) View.VISIBLE else View.GONE
@@ -323,6 +445,7 @@ class OverlayService : Service() {
 
             fun setTabState(photos: Boolean) {
                 showPhotos = photos
+                selectedImagePaths.clear()
                 photosTab.alpha = if (showPhotos) 1f else 0.6f
                 textsTab.alpha = if (showPhotos) 0.6f else 1f
                 prefs.edit().putString(
@@ -332,7 +455,7 @@ class OverlayService : Service() {
                 refreshFolderList()
                 var currentFolder = resolveCurrentFolder(showPhotos)
                 if (currentFolder.isEmpty() && folderItems.isNotEmpty()) {
-                    currentFolder = folderItems.first()
+                    currentFolder = folderItems.first().name
                     setCurrentFolder(showPhotos, currentFolder)
                 }
                 showFolders = currentFolder.isEmpty()
@@ -340,8 +463,9 @@ class OverlayService : Service() {
             }
 
             folderListView.setOnItemClickListener { _, _, position, _ ->
-                val name = folderItems[position]
+                val name = folderItems[position].name
                 setCurrentFolder(showPhotos, name)
+                selectedImagePaths.clear()
                 showFolders = false
                 refreshContent()
             }
@@ -365,6 +489,19 @@ class OverlayService : Service() {
             closeBtn.setOnClickListener {
                 removeGalleryOverlay()
                 showOverlay(lastImagePath)
+            }
+
+            selectionClear.setOnClickListener {
+                selectedImagePaths.clear()
+                updateSelectionUi()
+                (gridView.adapter as BaseAdapter).notifyDataSetChanged()
+            }
+
+            selectionSend.setOnClickListener {
+                val selected = selectedImagePaths.toList()
+                if (selected.isNotEmpty()) {
+                    shareImagesToDiscord(selected)
+                }
             }
 
             val params = WindowManager.LayoutParams()
@@ -410,27 +547,35 @@ class OverlayService : Service() {
                 while (iter.hasNext()) {
                     val name = iter.next()
                     if (name.isNotEmpty()) {
-                        names.add(name)
+                        names.add(if (name == "기본") RECENT_FOLDER_NAME else name)
                     }
                 }
             } catch (e: Exception) {
                 // Ignore malformed values
             }
         }
-        if (!names.contains("기본")) {
-            names.add("기본")
+        val uniqueNames = names.distinct()
+        names.clear()
+        names.addAll(uniqueNames)
+        if (!names.contains(RECENT_FOLDER_NAME)) {
+            names.add(RECENT_FOLDER_NAME)
         }
         val order = readStringListFromPrefs(prefs, orderKey)
-        if (order.isNotEmpty()) {
-            val ordered = order.filter { names.contains(it) }.toMutableList()
+        val normalizedOrder = order.map { if (it == "기본") RECENT_FOLDER_NAME else it }
+        if (normalizedOrder.isNotEmpty()) {
+            val ordered = normalizedOrder.filter { names.contains(it) }.distinct().toMutableList()
             for (name in names) {
                 if (!ordered.contains(name)) {
                     ordered.add(name)
                 }
             }
+            ordered.remove(RECENT_FOLDER_NAME)
+            ordered.add(0, RECENT_FOLDER_NAME)
             return ordered
         }
         names.sort()
+        names.remove(RECENT_FOLDER_NAME)
+        names.add(0, RECENT_FOLDER_NAME)
         return names
     }
 
@@ -459,7 +604,9 @@ class OverlayService : Service() {
         if (raw is String) {
             try {
                 val json = JSONObject(raw)
-                val array = json.optJSONArray(folderName) ?: JSONArray()
+                val array = json.optJSONArray(folderName)
+                    ?: if (folderName == RECENT_FOLDER_NAME) json.optJSONArray("기본") else null
+                    ?: JSONArray()
                 for (i in 0 until array.length()) {
                     val item = array.optString(i)
                     if (!item.isNullOrEmpty()) {
@@ -505,6 +652,79 @@ class OverlayService : Service() {
         return result
     }
 
+    private fun recordRecentImages(paths: List<String>) {
+        val validPaths = paths.filter { it.isNotEmpty() && File(it).exists() }
+        if (validPaths.isEmpty()) return
+
+        try {
+            val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+            val folders = readFolderJson(prefs, "flutter.image_folders")
+            val existing = mutableListOf<String>()
+            val currentRecent = folders.optJSONArray(RECENT_FOLDER_NAME)
+                ?: folders.optJSONArray("기본")
+                ?: JSONArray()
+            for (i in 0 until currentRecent.length()) {
+                val value = currentRecent.optString(i)
+                if (!value.isNullOrEmpty() && !existing.contains(value)) {
+                    existing.add(value)
+                }
+            }
+
+            for (path in validPaths.asReversed()) {
+                existing.remove(path)
+                existing.add(0, path)
+            }
+
+            while (existing.size > RECENT_FOLDER_LIMIT) {
+                existing.removeAt(existing.lastIndex)
+            }
+
+            val recentArray = JSONArray()
+            for (item in existing) {
+                recentArray.put(item)
+            }
+            folders.remove("기본")
+            folders.put(RECENT_FOLDER_NAME, recentArray)
+
+            val order = readStringListFromPrefs(prefs, "flutter.image_folder_order")
+                .map { if (it == "기본") RECENT_FOLDER_NAME else it }
+                .distinct()
+                .toMutableList()
+            val folderNames = folders.keys()
+            while (folderNames.hasNext()) {
+                val name = folderNames.next()
+                if (name.isNotEmpty() && !order.contains(name)) {
+                    order.add(name)
+                }
+            }
+            order.remove(RECENT_FOLDER_NAME)
+            order.add(0, RECENT_FOLDER_NAME)
+            val orderArray = JSONArray()
+            for (item in order) {
+                orderArray.put(item)
+            }
+
+            prefs.edit()
+                .putString("flutter.image_folders", folders.toString())
+                .putString("flutter.image_folder_order", orderArray.toString())
+                .apply()
+        } catch (e: Exception) {
+            // Ignore recent-list failures; sharing should still proceed.
+        }
+    }
+
+    private fun readFolderJson(prefs: SharedPreferences, key: String): JSONObject {
+        val raw = prefs.all[key]
+        if (raw is String) {
+            try {
+                return JSONObject(raw)
+            } catch (e: Exception) {
+                // Ignore malformed values
+            }
+        }
+        return JSONObject()
+    }
+
 
     private fun shareImageToDiscord(path: String) {
         try {
@@ -518,6 +738,7 @@ class OverlayService : Service() {
                 Toast.makeText(this, "디스코드가 설치되어 있지 않습니다", Toast.LENGTH_SHORT).show()
                 return
             }
+            recordRecentImages(listOf(path))
             suppressOverlayForShare()
             val extension = extractExtension(file)
             val shareFile = prepareShareCacheFile(file, extension)
@@ -531,6 +752,47 @@ class OverlayService : Service() {
                 setPackage(discordPackage)
             }
             grantUriPermission(discordPackage, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            startActivity(shareIntent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "디스코드 공유에 실패했습니다", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun shareImagesToDiscord(paths: List<String>) {
+        try {
+            val files = paths.map { File(it) }.filter { it.exists() }
+            if (files.isEmpty()) {
+                Toast.makeText(this, "사진을 찾을 수 없습니다", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val discordPackage = resolveDiscordPackage()
+            if (discordPackage == null) {
+                Toast.makeText(this, "디스코드가 설치되어 있지 않습니다", Toast.LENGTH_SHORT).show()
+                return
+            }
+
+            recordRecentImages(files.map { it.absolutePath })
+            suppressOverlayForShare()
+            val uris = ArrayList<Uri>()
+            for (file in files) {
+                val shareFile = prepareShareCacheFile(file, extractExtension(file))
+                val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", shareFile)
+                uris.add(uri)
+                grantUriPermission(discordPackage, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+
+            val action = if (uris.size == 1) Intent.ACTION_SEND else Intent.ACTION_SEND_MULTIPLE
+            val shareIntent = Intent(action).apply {
+                type = "image/*"
+                if (uris.size == 1) {
+                    putExtra(Intent.EXTRA_STREAM, uris.first())
+                } else {
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                }
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                setPackage(discordPackage)
+            }
             startActivity(shareIntent)
         } catch (e: Exception) {
             Toast.makeText(this, "디스코드 공유에 실패했습니다", Toast.LENGTH_SHORT).show()
@@ -623,6 +885,16 @@ class OverlayService : Service() {
         }
     }
 
+    private fun openHostApp() {
+        try {
+            val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: return
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(launchIntent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "앱을 열 수 없습니다", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun showOverlay(imagePath: String?) {
         try {
             if (overlayView != null) {
@@ -632,6 +904,10 @@ class OverlayService : Service() {
             lastImagePath = imagePath
             
             ensureForeground()
+            if (!isOverlayButtonEnabled()) {
+                removeOverlay()
+                return
+            }
             windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val inflater = getSystemService(Context.LAYOUT_INFLATER_SERVICE) as LayoutInflater
             overlayView = inflater.inflate(R.layout.overlay_layout, null)
@@ -759,6 +1035,17 @@ class OverlayService : Service() {
 
     private fun applyOverlaySettings() {
         try {
+            if (!isOverlayButtonEnabled()) {
+                val wasVisible = overlayView != null || galleryView != null
+                removeOverlay()
+                if (wasVisible) {
+                    ensureForeground()
+                }
+                return
+            }
+            if (overlayView == null) {
+                return
+            }
             val imageView = overlayView?.findViewById<ImageView>(R.id.overlay_image)
             if (imageView != null) {
                 applyOverlayIcon(imageView)
@@ -780,6 +1067,11 @@ class OverlayService : Service() {
         } catch (e: Exception) {
             // Silently handle errors
         }
+    }
+
+    private fun isOverlayButtonEnabled(): Boolean {
+        return getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+            .getBoolean("flutter.overlay_button_enabled", true)
     }
 
     private fun getOverlaySizePx(): Int {
@@ -883,7 +1175,7 @@ class OverlayService : Service() {
             val bmp = loadOverlayBitmap(prefs)
             if (bmp != null) {
                 val rounded = RoundedBitmapDrawableFactory.create(resources, bmp)
-                rounded.isCircular = true
+                rounded.cornerRadius = 18f * resources.displayMetrics.density
                 imageView.setImageDrawable(rounded)
                 imageView.scaleType = ImageView.ScaleType.CENTER_CROP
                 return
@@ -1043,10 +1335,33 @@ class OverlayService : Service() {
             }
         }
 
+        val pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT or
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_IMMUTABLE
+            } else {
+                0
+            }
+        val addIntent = PendingIntent.getService(
+            this,
+            1201,
+            Intent(this, OverlayService::class.java).apply { action = ACTION_OPEN_APP },
+            pendingFlags
+        )
+        val sendIntent = PendingIntent.getService(
+            this,
+            1202,
+            Intent(this, OverlayService::class.java).apply { action = ACTION_OPEN_GALLERY },
+            pendingFlags
+        )
+
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("SideCord")
-            .setContentText("Overlay active")
+            .setContentText("디스코드 이모티콘 준비됨")
+            .setColor(Color.rgb(126, 120, 154))
+            .setColorized(false)
+            .addAction(android.R.drawable.ic_input_add, "추가", addIntent)
+            .addAction(android.R.drawable.ic_menu_send, "전송", sendIntent)
             .setOngoing(true)
             .setAutoCancel(false)
             .setOnlyAlertOnce(true)
