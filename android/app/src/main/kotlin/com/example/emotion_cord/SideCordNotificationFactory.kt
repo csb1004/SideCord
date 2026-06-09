@@ -42,13 +42,15 @@ object SideCordNotificationFactory {
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(TITLE)
+            .setContentText(TITLE)
             .setTicker(TITLE)
             .setContentIntent(sendIntent)
-            .setCustomContentView(createContentView(context, addIntent, sendIntent))
-            .setCustomBigContentView(createContentView(context, addIntent, sendIntent))
+            .setCustomContentView(createContentView(context, sendIntent))
+            .setCustomBigContentView(createContentView(context, sendIntent))
             .setStyle(NotificationCompat.DecoratedCustomViewStyle())
             .setColor(Color.rgb(47, 128, 237))
             .setColorized(false)
+            .addAction(android.R.drawable.ic_input_add, ADD_LABEL, addIntent)
             .setOngoing(true)
             .setAutoCancel(false)
             .setOnlyAlertOnce(true)
@@ -61,15 +63,11 @@ object SideCordNotificationFactory {
 
     private fun createContentView(
         context: Context,
-        addIntent: PendingIntent,
         sendIntent: PendingIntent
     ): RemoteViews {
         return RemoteViews(context.packageName, R.layout.sidecord_notification).apply {
             setTextViewText(R.id.sidecord_notification_title, TITLE)
-            setTextViewText(R.id.sidecord_notification_add, ADD_LABEL)
             setTextViewText(R.id.sidecord_notification_send, SEND_LABEL)
-            setImageViewResource(R.id.sidecord_notification_icon, R.mipmap.ic_launcher)
-            setOnClickPendingIntent(R.id.sidecord_notification_add, addIntent)
             setOnClickPendingIntent(R.id.sidecord_notification_send, sendIntent)
             setOnClickPendingIntent(R.id.sidecord_notification_root, sendIntent)
         }
