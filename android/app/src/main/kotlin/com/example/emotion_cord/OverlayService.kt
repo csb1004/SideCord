@@ -1,8 +1,6 @@
 package com.example.emotion_cord
 
 import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
@@ -47,7 +45,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import androidx.core.content.FileProvider
 import androidx.core.graphics.drawable.RoundedBitmapDrawableFactory
-import androidx.core.app.NotificationCompat
 import android.content.SharedPreferences
 import java.io.File
 import kotlin.math.max
@@ -141,9 +138,6 @@ class OverlayService : Service() {
         const val ACTION_OPEN_GALLERY = "com.example.emotion_cord.action.OPEN_GALLERY"
         const val ACTION_OPEN_APP = "com.example.emotion_cord.action.OPEN_APP"
         const val EXTRA_IMAGE_PATH = "extra_image_path"
-        private const val CHANNEL_ID = "overlay_service"
-        private const val CHANNEL_NAME = "Overlay Service"
-        private const val NOTIFICATION_ID = 1102
         private const val RECENT_FOLDER_NAME = "최근 사용"
         private const val RECENT_FOLDER_LIMIT = 100
     }
@@ -1175,7 +1169,7 @@ class OverlayService : Service() {
             val bmp = loadOverlayBitmap(prefs)
             if (bmp != null) {
                 val rounded = RoundedBitmapDrawableFactory.create(resources, bmp)
-                rounded.cornerRadius = 18f * resources.displayMetrics.density
+                rounded.isCircular = true
                 imageView.setImageDrawable(rounded)
                 imageView.scaleType = ImageView.ScaleType.CENTER_CROP
                 return
@@ -1322,19 +1316,6 @@ class OverlayService : Service() {
     }
 
     private fun ensureForeground() {
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            if (manager.getNotificationChannel(CHANNEL_ID) == null) {
-                val channel = NotificationChannel(
-                    CHANNEL_ID,
-                    CHANNEL_NAME,
-                    NotificationManager.IMPORTANCE_LOW
-                )
-                channel.setShowBadge(false)
-                manager.createNotificationChannel(channel)
-            }
-        }
-
         val pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT or
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 PendingIntent.FLAG_IMMUTABLE
@@ -1354,28 +1335,18 @@ class OverlayService : Service() {
             pendingFlags
         )
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("SideCord")
-            .setContentText("디스코드 이모티콘 준비됨")
-            .setColor(Color.rgb(126, 120, 154))
-            .setColorized(false)
-            .addAction(android.R.drawable.ic_input_add, "추가", addIntent)
-            .addAction(android.R.drawable.ic_menu_send, "전송", sendIntent)
-            .setOngoing(true)
-            .setAutoCancel(false)
-            .setOnlyAlertOnce(true)
-            .setShowWhen(false)
-            .setSilent(true)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+        SideCordNotificationFactory.ensureChannel(this)
+        val notification = SideCordNotificationFactory.build(
+            context = this,
+            addIntent = addIntent,
+            sendIntent = sendIntent
+        )
 
         notification.flags = notification.flags or
             Notification.FLAG_ONGOING_EVENT or
             Notification.FLAG_NO_CLEAR
 
-        startForeground(NOTIFICATION_ID, notification)
+        startForeground(SideCordNotificationFactory.NOTIFICATION_ID, notification)
     }
 
     private fun showCloseTarget() {

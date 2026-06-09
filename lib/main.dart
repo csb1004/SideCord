@@ -728,14 +728,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           File(iconPath!),
                           fit: BoxFit.cover,
                         );
-                        return ClipRRect(
-                          borderRadius: BorderRadius.circular(18),
-                          child: image,
-                        );
+                        return ClipOval(child: image);
                       }
                       final icon = const Icon(Icons.photo, size: 48);
-                      return ClipRRect(
-                        borderRadius: BorderRadius.circular(18),
+                      return ClipOval(
                         child: Container(
                           alignment: Alignment.center,
                           child: icon,
