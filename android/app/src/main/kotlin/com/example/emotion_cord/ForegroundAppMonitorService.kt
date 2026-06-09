@@ -2,6 +2,7 @@ package com.example.emotion_cord
 
 import android.app.ActivityManager
 import android.app.AppOpsManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -16,6 +17,7 @@ class ForegroundAppMonitorService : Service() {
     companion object {
         const val ACTION_START = "com.example.emotion_cord.action.START_MONITOR"
         const val ACTION_STOP = "com.example.emotion_cord.action.STOP_MONITOR"
+        const val ACTION_NOTIFICATION_DISMISSED = "com.example.emotion_cord.action.MONITOR_NOTIFICATION_DISMISSED"
         const val ACTION_SUPPRESS_OVERLAY = "com.example.emotion_cord.action.SUPPRESS_OVERLAY"
         const val EXTRA_SUPPRESS_MS = "extra_suppress_ms"
         private const val PREFS_NAME = "FlutterSharedPreferences"
@@ -54,13 +56,19 @@ class ForegroundAppMonitorService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 setOverlayEnabled(true)
+                ensureForeground()
                 startMonitoring()
             }
-            ACTION_STOP -> {
-                setOverlayEnabled(false)
-                stopMonitoring()
-                stopSelf()
+            null -> {
+                if (isOverlayEnabled()) {
+                    ensureForeground()
+                    startMonitoring()
+                } else {
+                    stopSelf()
+                }
             }
+            ACTION_STOP,
+            ACTION_NOTIFICATION_DISMISSED -> stopFromNotification()
             ACTION_SUPPRESS_OVERLAY -> {
                 val durationMs = intent.getLongExtra(EXTRA_SUPPRESS_MS, 0L)
                 suppressUntilMs = maxOf(suppressUntilMs, System.currentTimeMillis() + durationMs)
@@ -72,16 +80,26 @@ class ForegroundAppMonitorService : Service() {
 
     override fun onDestroy() {
         stopMonitoring()
+        stopForeground(true)
         super.onDestroy()
     }
 
     private fun startMonitoring() {
         if (isMonitoring) {
+            ensureForeground()
             checkForegroundApp()
             return
         }
+        ensureForeground()
         isMonitoring = true
         handler.post(monitoringRunnable)
+    }
+
+    private fun stopFromNotification() {
+        setOverlayEnabled(false)
+        stopMonitoring()
+        stopForeground(true)
+        stopSelf()
     }
 
     private fun stopMonitoring() {
@@ -246,14 +264,53 @@ class ForegroundAppMonitorService : Service() {
                 action = OverlayService.ACTION_SHOW
                 putExtra(OverlayService.EXTRA_IMAGE_PATH, "")
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
-            }
+            startService(intent)
         } catch (e: Exception) {
             overlayActive = false
         }
+    }
+
+    private fun ensureForeground() {
+        SideCordNotificationFactory.ensureChannel(this)
+        startForeground(
+            SideCordNotificationFactory.NOTIFICATION_ID,
+            SideCordNotificationFactory.build(
+                context = this,
+                addIntent = createOpenAppIntent(),
+                sendIntent = createOpenGalleryIntent(),
+                deleteIntent = createDismissIntent()
+            )
+        )
+    }
+
+    private fun createOpenAppIntent(): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        return PendingIntent.getActivity(this, 1301, intent, pendingIntentFlags())
+    }
+
+    private fun createOpenGalleryIntent(): PendingIntent {
+        val intent = Intent(this, OverlayService::class.java).apply {
+            action = OverlayService.ACTION_OPEN_GALLERY
+        }
+        return PendingIntent.getService(this, 1302, intent, pendingIntentFlags())
+    }
+
+    private fun createDismissIntent(): PendingIntent {
+        val intent = Intent(this, ForegroundAppMonitorService::class.java).apply {
+            action = ACTION_NOTIFICATION_DISMISSED
+        }
+        return PendingIntent.getService(this, 1303, intent, pendingIntentFlags())
+    }
+
+    private fun pendingIntentFlags(): Int {
+        return PendingIntent.FLAG_UPDATE_CURRENT or
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_IMMUTABLE
+            } else {
+                0
+            }
     }
 
     private fun persistLastForegroundApp(packageName: String?) {

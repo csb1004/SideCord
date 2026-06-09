@@ -199,7 +199,11 @@ class MainActivity : FlutterActivity() {
 						val intent = Intent(this, ForegroundAppMonitorService::class.java)
 						intent.action = ForegroundAppMonitorService.ACTION_START
 						try {
-							startService(intent)
+							if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+								startForegroundService(intent)
+							} else {
+								startService(intent)
+							}
 							result.success(true)
 						} catch (e: Exception) {
 							result.error("START_MONITORING_FAILED", e.message, null)
@@ -209,7 +213,7 @@ class MainActivity : FlutterActivity() {
 						val intent = Intent(this, ForegroundAppMonitorService::class.java)
 						intent.action = ForegroundAppMonitorService.ACTION_STOP
 						try {
-							stopService(intent)
+							startService(intent)
 							result.success(true)
 						} catch (e: Exception) {
 							result.error("STOP_MONITORING_FAILED", e.message, null)

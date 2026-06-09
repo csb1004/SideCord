@@ -1,7 +1,5 @@
 package com.example.emotion_cord
 
-import android.app.Notification
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -177,24 +175,21 @@ class OverlayService : Service() {
                     showOverlay(path)
                 }
                 ACTION_HIDE -> {
+                    removeGalleryOverlay()
                     removeOverlay()
-                    stopForeground(true)
                     stopSelf()
                 }
                 ACTION_UPDATE_SETTINGS -> {
                     applyOverlaySettings()
                 }
                 ACTION_OPEN_GALLERY -> {
-                    ensureForeground()
                     showGalleryOverlay()
                 }
                 ACTION_OPEN_APP -> {
-                    ensureForeground()
                     openHostApp()
                 }
             }
         } catch (e: Exception) {
-            stopForeground(true)
             stopSelf()
         }
         return START_STICKY
@@ -203,7 +198,6 @@ class OverlayService : Service() {
     override fun onDestroy() {
         removeGalleryOverlay()
         removeOverlay()
-        stopForeground(true)
         super.onDestroy()
     }
 
@@ -213,7 +207,6 @@ class OverlayService : Service() {
         }
         try {
             removeOverlay()
-            ensureForeground()
             windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val inflater = getSystemService(Context.LAYOUT_INFLATER_SERVICE) as LayoutInflater
             galleryView = inflater.inflate(R.layout.overlay_gallery, null)
@@ -897,7 +890,6 @@ class OverlayService : Service() {
 
             lastImagePath = imagePath
             
-            ensureForeground()
             if (!isOverlayButtonEnabled()) {
                 removeOverlay()
                 return
@@ -1030,11 +1022,7 @@ class OverlayService : Service() {
     private fun applyOverlaySettings() {
         try {
             if (!isOverlayButtonEnabled()) {
-                val wasVisible = overlayView != null || galleryView != null
                 removeOverlay()
-                if (wasVisible) {
-                    ensureForeground()
-                }
                 return
             }
             if (overlayView == null) {
@@ -1313,40 +1301,6 @@ class OverlayService : Service() {
             overlayView = null
             hideCloseTarget()
         }
-    }
-
-    private fun ensureForeground() {
-        val pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT or
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                PendingIntent.FLAG_IMMUTABLE
-            } else {
-                0
-            }
-        val addIntent = PendingIntent.getService(
-            this,
-            1201,
-            Intent(this, OverlayService::class.java).apply { action = ACTION_OPEN_APP },
-            pendingFlags
-        )
-        val sendIntent = PendingIntent.getService(
-            this,
-            1202,
-            Intent(this, OverlayService::class.java).apply { action = ACTION_OPEN_GALLERY },
-            pendingFlags
-        )
-
-        SideCordNotificationFactory.ensureChannel(this)
-        val notification = SideCordNotificationFactory.build(
-            context = this,
-            addIntent = addIntent,
-            sendIntent = sendIntent
-        )
-
-        notification.flags = notification.flags or
-            Notification.FLAG_ONGOING_EVENT or
-            Notification.FLAG_NO_CLEAR
-
-        startForeground(SideCordNotificationFactory.NOTIFICATION_ID, notification)
     }
 
     private fun showCloseTarget() {

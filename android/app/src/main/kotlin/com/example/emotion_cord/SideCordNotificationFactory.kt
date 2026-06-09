@@ -37,9 +37,10 @@ object SideCordNotificationFactory {
     fun build(
         context: Context,
         addIntent: PendingIntent,
-        sendIntent: PendingIntent
+        sendIntent: PendingIntent,
+        deleteIntent: PendingIntent? = null
     ): Notification {
-        return NotificationCompat.Builder(context, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(TITLE)
             .setContentText(TITLE)
@@ -51,14 +52,17 @@ object SideCordNotificationFactory {
             .setColor(Color.rgb(47, 128, 237))
             .setColorized(false)
             .addAction(android.R.drawable.ic_input_add, ADD_LABEL, addIntent)
-            .setOngoing(true)
+            .setOngoing(false)
             .setAutoCancel(false)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+        if (deleteIntent != null) {
+            builder.setDeleteIntent(deleteIntent)
+        }
+        return builder.build()
     }
 
     private fun createContentView(
