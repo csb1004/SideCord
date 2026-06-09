@@ -143,6 +143,7 @@ class OverlayService : Service() {
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
     private var galleryView: View? = null
+    private var restoreOverlayAfterGallery = false
     private var lastImagePath: String? = null
     private var overlayParams: WindowManager.LayoutParams? = null
     private var touchStartX = 0f
@@ -206,6 +207,7 @@ class OverlayService : Service() {
             return
         }
         try {
+            restoreOverlayAfterGallery = overlayView != null
             removeOverlay()
             windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val inflater = getSystemService(Context.LAYOUT_INFLATER_SERVICE) as LayoutInflater
@@ -479,13 +481,11 @@ class OverlayService : Service() {
             textsTab.setOnClickListener { setTabState(false) }
 
             root.setOnClickListener {
-                removeGalleryOverlay()
-                showOverlay(lastImagePath)
+                closeGalleryOverlay()
             }
 
             closeBtn.setOnClickListener {
-                removeGalleryOverlay()
-                showOverlay(lastImagePath)
+                closeGalleryOverlay()
             }
 
             selectionClear.setOnClickListener {
@@ -518,6 +518,18 @@ class OverlayService : Service() {
             windowManager?.addView(galleryView, params)
         } catch (e: Exception) {
             galleryView = null
+            restoreOverlayAfterGallery = false
+        }
+    }
+
+    private fun closeGalleryOverlay() {
+        val shouldRestore = restoreOverlayAfterGallery
+        restoreOverlayAfterGallery = false
+        removeGalleryOverlay()
+        if (shouldRestore) {
+            showOverlay(lastImagePath)
+        } else {
+            stopSelf()
         }
     }
 
@@ -529,6 +541,10 @@ class OverlayService : Service() {
             }
         } catch (e: Exception) {
             galleryView = null
+        } finally {
+            if (galleryView == null) {
+                restoreOverlayAfterGallery = false
+            }
         }
     }
 
