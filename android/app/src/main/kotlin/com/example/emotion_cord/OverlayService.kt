@@ -410,7 +410,14 @@ class OverlayService : Service() {
                 folderAdapter.notifyDataSetChanged()
             }
 
-            fun refreshContent() {
+            fun resetContentScroll() {
+                gridView.setSelection(0)
+                textListView.setSelection(0)
+                gridView.post { gridView.setSelection(0) }
+                textListView.post { textListView.setSelection(0) }
+            }
+
+            fun refreshContent(resetScroll: Boolean = false) {
                 val currentFolder = resolveCurrentFolder(showPhotos)
                 folderLabel.text = if (currentFolder.isNotEmpty()) currentFolder else "폴더 선택"
 
@@ -428,6 +435,9 @@ class OverlayService : Service() {
                 gridView.visibility = if (showPhotos && !showFolders) View.VISIBLE else View.GONE
                 textListView.visibility = if (!showPhotos && !showFolders) View.VISIBLE else View.GONE
                 folderListView.visibility = if (showFolders) View.VISIBLE else View.GONE
+                if (resetScroll) {
+                    resetContentScroll()
+                }
             }
 
             fun setTabState(photos: Boolean) {
@@ -454,7 +464,7 @@ class OverlayService : Service() {
                 setCurrentFolder(showPhotos, name)
                 selectedImagePaths.clear()
                 showFolders = false
-                refreshContent()
+                refreshContent(resetScroll = true)
             }
 
             folderChange.setOnClickListener {
