@@ -6,6 +6,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:http/http.dart' as http;
+import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 
@@ -47,6 +48,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   List<String> _textFolderOrder = [];
   String _currentImageFolder = recentFolderName;
   String _currentTextFolder = recentFolderName;
+  Timer? _dcconSyncTimer;
+  int _dcconCompletionVersion = 0;
   static const platform = MethodChannel('com.yourapp/overlay');
 
   @override
@@ -64,6 +67,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _dcconSyncTimer?.cancel();
     _stopMonitoring();
     super.dispose();
   }
@@ -72,6 +76,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _loadFolderData();
+      _startDcconSyncPolling();
     }
   }
 
@@ -133,6 +138,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _loadFolderData() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
       final imageJson = prefs.getString('image_folders');
       final textJson = prefs.getString('text_folders');
       final imageOrderJson = prefs.getString('image_folder_order');
@@ -451,15 +457,49 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         builder: (_) => DcconBrowserPage(onImport: _importDcconIcons),
       ),
     );
-    if (mounted) setState(() {});
+    await _loadFolderData();
   }
 
   Future<int> _importDcconIcons(
     DcconPackage package,
     List<DcconIcon> icons, {
     DcconImportProgressCallback? onProgress,
+    List<DcconIcon>? catalogIcons,
+    List<DcconIcon>? existingIcons,
   }) async {
     if (icons.isEmpty) return 0;
+
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      final folderName = _dcconFolderName(package);
+      final queued = await platform.invokeMethod<bool>('startDcconDownload', {
+        'data': jsonEncode({
+          'packageId': package.id,
+          'title': package.title,
+          'folderName': folderName,
+          'icons': [
+            for (final icon in icons)
+              {
+                'title': icon.title,
+                'url': icon.imageUrl,
+                'extension': icon.extension,
+              },
+          ],
+          'catalogUrls': [
+            for (final icon in catalogIcons ?? const <DcconIcon>[])
+              icon.imageUrl,
+          ],
+          'existingUrls': [
+            for (final icon in existingIcons ?? const <DcconIcon>[])
+              icon.imageUrl,
+          ],
+        }),
+      });
+      if (queued != true) {
+        throw Exception('Cannot start background download.');
+      }
+      _startDcconSyncPolling();
+      return icons.length;
+    }
 
     final imagesDir = await _getImagesDirectory();
     if (imagesDir == null) {
@@ -469,6 +509,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final folderName = _dcconFolderName(package);
     final list = List<String>.from(_imageFolders[folderName] ?? const []);
     var imported = 0;
+    final importedIcons = <DcconIcon>[];
     final client = http.Client();
     onProgress?.call(
       DcconImportProgress(
@@ -490,6 +531,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         );
         if (savedPath != null) {
           list.add(savedPath);
+          importedIcons.add(icon);
           imported += 1;
         }
         onProgress?.call(
@@ -515,7 +557,39 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (mounted) setState(() {});
     await _saveImageFolders();
     await _saveFolderOrders();
+    await DcconInstallStore().recordImport(
+      package,
+      importedIcons,
+      catalogIcons: catalogIcons,
+      existingIcons: existingIcons,
+    );
     return imported;
+  }
+
+  void _startDcconSyncPolling() {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    _dcconSyncTimer?.cancel();
+    _dcconSyncTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+      try {
+        final status = await platform.invokeMapMethod<String, dynamic>(
+          'getDcconDownloadStatus',
+        );
+        if (status == null) return;
+        final active = (status['active'] as num?)?.toInt() ?? 0;
+        final version = (status['completedVersion'] as num?)?.toInt() ?? 0;
+        if (version != _dcconCompletionVersion) {
+          _dcconCompletionVersion = version;
+          await _loadFolderData();
+        }
+        if (active <= 0) {
+          _dcconSyncTimer?.cancel();
+          _dcconSyncTimer = null;
+        }
+      } catch (_) {
+        _dcconSyncTimer?.cancel();
+        _dcconSyncTimer = null;
+      }
+    });
   }
 
   String _dcconIconProgressLabel(DcconIcon icon, int index) {
@@ -556,7 +630,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   String _dcconFolderName(DcconPackage package) {
-    final title = package.title.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final title = DcconInstallStore.folderName(package);
     if (title.isNotEmpty && !_isProtectedFolder(title)) return title;
     return '디시콘 ${package.id}';
   }

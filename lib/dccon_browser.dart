@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -104,7 +105,146 @@ typedef DcconImportCallback =
       DcconPackage package,
       List<DcconIcon> icons, {
       DcconImportProgressCallback? onProgress,
+      List<DcconIcon>? catalogIcons,
+      List<DcconIcon>? existingIcons,
     });
+
+class DcconInstallStatus {
+  const DcconInstallStatus({
+    required this.installed,
+    required this.installedIcons,
+    required this.missingIcons,
+  });
+
+  final bool installed;
+  final List<DcconIcon> installedIcons;
+  final List<DcconIcon> missingIcons;
+}
+
+class DcconInstallStore {
+  static const String packagesPrefKey = 'dccon_packages';
+  static const String imageFoldersPrefKey = 'image_folders';
+
+  Future<Set<String>> findInstalledPackageIds(
+    List<DcconPackage> packages,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final records = _decodeRecords(prefs.getString(packagesPrefKey));
+    final folders = _decodeFolders(prefs.getString(imageFoldersPrefKey));
+    return {
+      for (final package in packages)
+        if (records.containsKey(package.id) ||
+            (folders[folderName(package)]?.isNotEmpty ?? false))
+          package.id,
+    };
+  }
+
+  Future<DcconInstallStatus> statusFor(
+    DcconPackage package,
+    List<DcconIcon> remoteIcons,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final records = _decodeRecords(prefs.getString(packagesPrefKey));
+    final folders = _decodeFolders(prefs.getString(imageFoldersPrefKey));
+    final record = records[package.id];
+    final folder = record?['folderName']?.toString() ?? folderName(package);
+    final localPaths = folders[folder] ?? const <String>[];
+    final recordedUrls = _stringList(record?['importedUrls']);
+
+    List<DcconIcon> installedIcons;
+    if (recordedUrls.isNotEmpty) {
+      installedIcons = [
+        for (final icon in remoteIcons)
+          if (recordedUrls.contains(icon.imageUrl)) icon,
+      ];
+    } else {
+      final legacyCount = localPaths.length.clamp(0, remoteIcons.length);
+      installedIcons = remoteIcons.take(legacyCount).toList();
+    }
+
+    final installedUrls = installedIcons.map((icon) => icon.imageUrl).toSet();
+    return DcconInstallStatus(
+      installed: localPaths.isNotEmpty || recordedUrls.isNotEmpty,
+      installedIcons: installedIcons,
+      missingIcons: [
+        for (final icon in remoteIcons)
+          if (!installedUrls.contains(icon.imageUrl)) icon,
+      ],
+    );
+  }
+
+  Future<void> recordImport(
+    DcconPackage package,
+    List<DcconIcon> importedIcons, {
+    List<DcconIcon>? catalogIcons,
+    List<DcconIcon>? existingIcons,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final records = _decodeRecords(prefs.getString(packagesPrefKey));
+    final previous = records[package.id] ?? <String, dynamic>{};
+    final importedUrls = <String>{
+      ..._stringList(previous['importedUrls']),
+      ...?existingIcons?.map((icon) => icon.imageUrl),
+      ...importedIcons.map((icon) => icon.imageUrl),
+    };
+    records[package.id] = {
+      'title': package.title,
+      'folderName': folderName(package),
+      'importedUrls': importedUrls.toList(),
+      'catalogUrls': (catalogIcons ?? const <DcconIcon>[])
+          .map((icon) => icon.imageUrl)
+          .toList(),
+      'updatedAt': DateTime.now().millisecondsSinceEpoch,
+    };
+    await prefs.setString(packagesPrefKey, jsonEncode(records));
+  }
+
+  static String folderName(DcconPackage package) {
+    final title = package.title.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (title.isEmpty || title == '최근 사용' || title == '기본') {
+      return '디시콘 ${package.id}';
+    }
+    return title;
+  }
+
+  Map<String, Map<String, dynamic>> _decodeRecords(String? value) {
+    if (value == null || value.isEmpty) return {};
+    try {
+      final decoded = jsonDecode(value);
+      if (decoded is! Map) return {};
+      return {
+        for (final entry in decoded.entries)
+          if (entry.value is Map)
+            entry.key.toString(): Map<String, dynamic>.from(entry.value as Map),
+      };
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Map<String, List<String>> _decodeFolders(String? value) {
+    if (value == null || value.isEmpty) return {};
+    try {
+      final decoded = jsonDecode(value);
+      if (decoded is! Map) return {};
+      return {
+        for (final entry in decoded.entries)
+          if (entry.value is List)
+            entry.key.toString(): _stringList(entry.value),
+      };
+    } catch (_) {
+      return {};
+    }
+  }
+
+  List<String> _stringList(Object? value) {
+    if (value is! List) return const [];
+    return value.map((item) => item.toString()).toList();
+  }
+}
 
 class DcconClient {
   DcconClient({http.Client? client}) : _client = client ?? http.Client();
@@ -406,8 +546,11 @@ class _DcconBrowserPageState extends State<DcconBrowserPage> {
   static const String _modePrefKey = 'dccon_list_mode';
 
   final DcconClient _client = DcconClient();
+  final DcconInstallStore _installStore = DcconInstallStore();
   final TextEditingController _searchController = TextEditingController();
   late Future<List<DcconPackage>> _packagesFuture;
+  final Map<String, int> _updateCounts = {};
+  final Set<String> _updatingPackageIds = {};
   String _activeQuery = '';
   DcconListMode _selectedMode = DcconListMode.daily;
 
@@ -430,15 +573,91 @@ class _DcconBrowserPageState extends State<DcconBrowserPage> {
     setState(() {
       _activeQuery = query;
       _packagesFuture = query.isEmpty
-          ? _client.loadPackages(_selectedMode)
-          : _client.search(query);
+          ? _loadPackages(_selectedMode)
+          : _searchPackages(query);
     });
   }
 
   Future<List<DcconPackage>> _loadInitialPackages() async {
     final prefs = await SharedPreferences.getInstance();
     _selectedMode = DcconListMode.fromStorage(prefs.getString(_modePrefKey));
-    return _client.loadPackages(_selectedMode);
+    return _loadPackages(_selectedMode);
+  }
+
+  Future<List<DcconPackage>> _loadPackages(DcconListMode mode) async {
+    final packages = await _client.loadPackages(mode);
+    unawaited(_refreshUpdateCounts(packages));
+    return packages;
+  }
+
+  Future<List<DcconPackage>> _searchPackages(String query) async {
+    final packages = await _client.search(query);
+    unawaited(_refreshUpdateCounts(packages));
+    return packages;
+  }
+
+  Future<void> _refreshUpdateCounts(List<DcconPackage> packages) async {
+    final installedIds = await _installStore.findInstalledPackageIds(packages);
+    final counts = <String, int>{};
+    for (final package in packages) {
+      if (!installedIds.contains(package.id)) continue;
+      try {
+        final detail = await _client.loadDetail(package);
+        final status = await _installStore.statusFor(
+          detail.package,
+          detail.icons,
+        );
+        if (status.missingIcons.isNotEmpty) {
+          counts[package.id] = status.missingIcons.length;
+        }
+      } catch (_) {
+        // A failed update check should not hide the package list.
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _updateCounts
+        ..clear()
+        ..addAll(counts);
+    });
+  }
+
+  Future<void> _updatePackage(DcconPackage package) async {
+    if (_updatingPackageIds.contains(package.id)) return;
+    setState(() => _updatingPackageIds.add(package.id));
+    try {
+      final detail = await _client.loadDetail(package);
+      final status = await _installStore.statusFor(
+        detail.package,
+        detail.icons,
+      );
+      if (status.missingIcons.isEmpty) {
+        if (mounted) {
+          setState(() => _updateCounts.remove(package.id));
+        }
+        return;
+      }
+      final queued = await widget.onImport(
+        detail.package,
+        status.missingIcons,
+        catalogIcons: detail.icons,
+        existingIcons: status.installedIcons,
+      );
+      if (!mounted) return;
+      setState(() => _updateCounts.remove(package.id));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('$queued개 추가 디시콘 다운로드를 시작했습니다.')));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('디시콘 업데이트를 시작하지 못했습니다.')));
+    } finally {
+      if (mounted) {
+        setState(() => _updatingPackageIds.remove(package.id));
+      }
+    }
   }
 
   Future<void> _selectMode(DcconListMode mode) async {
@@ -451,7 +670,7 @@ class _DcconBrowserPageState extends State<DcconBrowserPage> {
     setState(() {
       _selectedMode = mode;
       _activeQuery = '';
-      _packagesFuture = _client.loadPackages(mode);
+      _packagesFuture = _loadPackages(mode);
     });
   }
 
@@ -589,7 +808,7 @@ class _DcconBrowserPageState extends State<DcconBrowserPage> {
                         crossAxisCount: columns,
                         mainAxisSpacing: 10,
                         crossAxisSpacing: 10,
-                        childAspectRatio: 0.74,
+                        childAspectRatio: 0.68,
                       ),
                       itemCount: packages.length,
                       itemBuilder: (context, index) {
@@ -597,6 +816,9 @@ class _DcconBrowserPageState extends State<DcconBrowserPage> {
                         return _DcconPackageTile(
                           package: package,
                           onTap: () => _openPackage(package),
+                          updateCount: _updateCounts[package.id] ?? 0,
+                          updating: _updatingPackageIds.contains(package.id),
+                          onUpdate: () => _updatePackage(package),
                         );
                       },
                     );
@@ -629,6 +851,7 @@ class DcconPackageDetailPage extends StatefulWidget {
 
 class _DcconPackageDetailPageState extends State<DcconPackageDetailPage> {
   late Future<DcconPackageDetail> _detailFuture;
+  final DcconInstallStore _installStore = DcconInstallStore();
   final Set<int> _selectedIndexes = {};
   bool _isImporting = false;
   DcconImportProgress? _progress;
@@ -656,18 +879,39 @@ class _DcconPackageDetailPageState extends State<DcconPackageDetailPage> {
     });
 
     try {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${icons.length}개 디시콘 다운로드를 시작했습니다.')),
+      final isFullPackage = icons.length == detail.icons.length;
+      final installStatus = await _installStore.statusFor(
+        detail.package,
+        detail.icons,
       );
+      final installedUrls = installStatus.installedIcons
+          .map((icon) => icon.imageUrl)
+          .toSet();
+      final iconsToImport = isFullPackage
+          ? installStatus.missingIcons
+          : [
+              for (final icon in icons)
+                if (!installedUrls.contains(icon.imageUrl)) icon,
+            ];
+      if (iconsToImport.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('이미 최신 상태입니다.')));
+        }
+        return;
+      }
       final count = await widget.onImport(
         detail.package,
-        icons,
+        iconsToImport,
         onProgress: (progress) {
           if (!mounted) return;
           setState(() {
             _progress = progress;
           });
         },
+        catalogIcons: isFullPackage ? detail.icons : null,
+        existingIcons: installStatus.installedIcons,
       );
       if (!mounted) return;
       if (count == 0) {
@@ -682,7 +926,7 @@ class _DcconPackageDetailPageState extends State<DcconPackageDetailPage> {
       });
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('$count개 디시콘을 가져왔습니다.')));
+      ).showSnackBar(SnackBar(content: Text('$count개 디시콘 다운로드를 시작했습니다.')));
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -875,10 +1119,19 @@ class _DcconImportProgressPanel extends StatelessWidget {
 }
 
 class _DcconPackageTile extends StatelessWidget {
-  const _DcconPackageTile({required this.package, required this.onTap});
+  const _DcconPackageTile({
+    required this.package,
+    required this.onTap,
+    required this.updateCount,
+    required this.updating,
+    required this.onUpdate,
+  });
 
   final DcconPackage package;
   final VoidCallback onTap;
+  final int updateCount;
+  final bool updating;
+  final VoidCallback onUpdate;
 
   @override
   Widget build(BuildContext context) {
@@ -918,6 +1171,27 @@ class _DcconPackageTile extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+              if (updateCount > 0) ...[
+                const SizedBox(height: 6),
+                SizedBox(
+                  width: double.infinity,
+                  height: 34,
+                  child: FilledButton.tonalIcon(
+                    onPressed: updating ? null : onUpdate,
+                    icon: updating
+                        ? const SizedBox.square(
+                            dimension: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.system_update_alt, size: 17),
+                    label: Text('업데이트 +$updateCount'),
+                    style: FilledButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      textStyle: theme.textTheme.labelSmall,
+                    ),
                   ),
                 ),
               ],

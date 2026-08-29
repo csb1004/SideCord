@@ -108,6 +108,37 @@ class MainActivity : FlutterActivity() {
 		methodChannel!!.setMethodCallHandler { call, result ->
 			try {
 				when (call.method) {
+					"startDcconDownload" -> {
+						try {
+							val data = call.argument<String>("data") ?: ""
+							if (data.isBlank()) {
+								result.error("INVALID_DCCON_DOWNLOAD", "Download data is empty.", null)
+							} else {
+								val intent = Intent(this, DcconDownloadService::class.java).apply {
+									putExtra(DcconDownloadService.EXTRA_DATA, data)
+								}
+								ContextCompat.startForegroundService(this, intent)
+								result.success(true)
+							}
+						} catch (e: Exception) {
+							result.error("START_DCCON_DOWNLOAD_FAILED", e.message, null)
+						}
+					}
+					"getDcconDownloadStatus" -> {
+						val prefs = getSharedPreferences(
+							"FlutterSharedPreferences",
+							android.content.Context.MODE_PRIVATE,
+						)
+						result.success(
+							mapOf(
+								"active" to prefs.getInt(DcconDownloadService.PREF_ACTIVE, 0),
+								"completedVersion" to prefs.getInt(
+									DcconDownloadService.PREF_COMPLETED_VERSION,
+									0,
+								),
+							),
+						)
+					}
 					"setImageFolders" -> {
 						try {
 							val data = call.argument<String>("data") ?: "{}"

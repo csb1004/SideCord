@@ -4,6 +4,7 @@ import 'package:emotion_cord/dccon_browser.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   test(
@@ -181,5 +182,72 @@ void main() {
     expect(detail.icons, hasLength(1));
     expect(detail.icons.single.extension, 'gif');
     expect(detail.icons.single.imageUrl, contains('dccon.php?no=icon_path'));
+  });
+
+  group('DcconInstallStore', () {
+    const package = DcconPackage(
+      id: '42',
+      title: '업데이트 테스트콘',
+      seller: 'tester',
+      thumbnailUrl: 'thumb',
+    );
+    const icons = [
+      DcconIcon(title: 'one', imageUrl: 'https://image/1', extension: 'png'),
+      DcconIcon(title: 'two', imageUrl: 'https://image/2', extension: 'png'),
+      DcconIcon(title: 'three', imageUrl: 'https://image/3', extension: 'gif'),
+    ];
+
+    test('uses recorded URLs to return only newly added icons', () async {
+      SharedPreferences.setMockInitialValues({
+        'image_folders': jsonEncode({
+          '업데이트 테스트콘': ['one.png', 'two.png'],
+        }),
+        'dccon_packages': jsonEncode({
+          '42': {
+            'folderName': '업데이트 테스트콘',
+            'importedUrls': ['https://image/1', 'https://image/2'],
+          },
+        }),
+      });
+
+      final status = await DcconInstallStore().statusFor(package, icons);
+
+      expect(status.installed, isTrue);
+      expect(status.installedIcons, icons.take(2));
+      expect(status.missingIcons, [icons.last]);
+    });
+
+    test(
+      'treats legacy folder items as the beginning of the package',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          'image_folders': jsonEncode({
+            '업데이트 테스트콘': ['legacy-one.png', 'legacy-two.png'],
+          }),
+        });
+
+        final status = await DcconInstallStore().statusFor(package, icons);
+
+        expect(status.installed, isTrue);
+        expect(status.installedIcons, icons.take(2));
+        expect(status.missingIcons, [icons.last]);
+      },
+    );
+
+    test('recordImport merges existing and downloaded icon URLs', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = DcconInstallStore();
+
+      await store.recordImport(
+        package,
+        [icons.last],
+        catalogIcons: icons,
+        existingIcons: icons.take(2).toList(),
+      );
+      final status = await store.statusFor(package, icons);
+
+      expect(status.installedIcons, icons);
+      expect(status.missingIcons, isEmpty);
+    });
   });
 }
