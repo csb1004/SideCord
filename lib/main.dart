@@ -33,6 +33,18 @@ enum FolderType { images, texts }
 const String recentFolderName = '최근 사용';
 const int recentFolderLimit = 100;
 
+class _DcconFolderUpdate {
+  const _DcconFolderUpdate({
+    required this.folderName,
+    required this.detail,
+    required this.status,
+  });
+
+  final String folderName;
+  final DcconPackageDetail detail;
+  final DcconInstallStatus status;
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -42,6 +54,8 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final ImagePicker _imagePicker = ImagePicker();
+  final DcconClient _dcconUpdateClient = DcconClient();
+  final DcconInstallStore _dcconInstallStore = DcconInstallStore();
   Map<String, List<String>> _imageFolders = {};
   Map<String, List<String>> _textFolders = {};
   List<String> _imageFolderOrder = [];
@@ -50,6 +64,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String _currentTextFolder = recentFolderName;
   Timer? _dcconSyncTimer;
   int _dcconCompletionVersion = 0;
+  final Map<String, _DcconFolderUpdate> _dcconFolderUpdates = {};
+  final Set<String> _updatingDcconFolders = {};
+  bool _checkingDcconUpdates = false;
   static const platform = MethodChannel('com.yourapp/overlay');
 
   @override
@@ -60,6 +77,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _loadFolderData().then((_) {
       if (mounted) {
         _initializeOverlay();
+        _refreshDcconFolderUpdates();
       }
     });
   }
@@ -68,6 +86,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _dcconSyncTimer?.cancel();
+    _dcconUpdateClient.close();
     _stopMonitoring();
     super.dispose();
   }
@@ -75,9 +94,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _loadFolderData();
-      _startDcconSyncPolling();
+      _reloadAfterResume();
     }
+  }
+
+  Future<void> _reloadAfterResume() async {
+    await _loadFolderData();
+    _startDcconSyncPolling();
+    await _refreshDcconFolderUpdates();
   }
 
   Future<void> _initializeOverlay() async {
@@ -381,6 +405,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
     if (type == FolderType.images) {
       await _saveImageFolders();
+      await _dcconInstallStore.renameFolder(oldName, trimmed);
+      if (mounted) {
+        setState(() {
+          final update = _dcconFolderUpdates.remove(oldName);
+          if (update != null) {
+            _dcconFolderUpdates[trimmed] = _DcconFolderUpdate(
+              folderName: trimmed,
+              detail: update.detail,
+              status: update.status,
+            );
+          }
+        });
+      }
     } else {
       await _saveTextFolders();
     }
@@ -414,6 +451,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
     if (type == FolderType.images) {
       await _saveImageFolders();
+      await _dcconInstallStore.removeFolder(name);
+      if (mounted) {
+        setState(() => _dcconFolderUpdates.remove(name));
+      }
     } else {
       await _saveTextFolders();
     }
@@ -458,6 +499,128 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ),
     );
     await _loadFolderData();
+    await _refreshDcconFolderUpdates();
+  }
+
+  Future<void> _refreshDcconFolderUpdates() async {
+    if (_checkingDcconUpdates) return;
+    _checkingDcconUpdates = true;
+    if (mounted) {
+      setState(() => _dcconFolderUpdates.clear());
+    }
+
+    try {
+      final installed = await _dcconInstallStore.installedPackages();
+      final mappedFolders = installed.map((item) => item.folderName).toSet();
+      for (final item in installed) {
+        await _checkDcconPackageUpdate(item);
+      }
+
+      final legacyFolders = _imageFolderOrder.where(
+        (name) =>
+            !_isProtectedFolder(name) &&
+            (_imageFolders[name]?.isNotEmpty ?? false) &&
+            !mappedFolders.contains(name),
+      );
+      for (final folderName in legacyFolders) {
+        try {
+          final results = await _dcconUpdateClient.search(folderName);
+          final normalizedFolder = _normalizeDcconTitle(folderName);
+          final package = results.cast<DcconPackage?>().firstWhere(
+            (item) =>
+                item != null &&
+                _normalizeDcconTitle(item.title) == normalizedFolder,
+            orElse: () => null,
+          );
+          if (package == null) continue;
+          final detail = await _dcconUpdateClient.loadDetail(package);
+          final status = await _dcconInstallStore.statusFor(
+            detail.package,
+            detail.icons,
+          );
+          await _dcconInstallStore.recordImport(
+            detail.package,
+            const [],
+            catalogIcons: detail.icons,
+            existingIcons: status.installedIcons,
+          );
+          _setDcconFolderUpdate(folderName, detail, status);
+        } catch (_) {
+          // Manually created folders do not need to match a dccon package.
+        }
+      }
+    } finally {
+      _checkingDcconUpdates = false;
+    }
+  }
+
+  Future<void> _checkDcconPackageUpdate(DcconInstalledPackage installed) async {
+    try {
+      final detail = await _dcconUpdateClient.loadDetail(installed.package);
+      final status = await _dcconInstallStore.statusFor(
+        detail.package,
+        detail.icons,
+      );
+      _setDcconFolderUpdate(installed.folderName, detail, status);
+    } catch (_) {
+      // Keep the folder list usable when an update check fails.
+    }
+  }
+
+  void _setDcconFolderUpdate(
+    String folderName,
+    DcconPackageDetail detail,
+    DcconInstallStatus status,
+  ) {
+    if (!mounted) return;
+    if (!_imageFolders.containsKey(folderName)) return;
+    setState(() {
+      if (status.missingIcons.isEmpty) {
+        _dcconFolderUpdates.remove(folderName);
+      } else {
+        _dcconFolderUpdates[folderName] = _DcconFolderUpdate(
+          folderName: folderName,
+          detail: detail,
+          status: status,
+        );
+      }
+    });
+  }
+
+  String _normalizeDcconTitle(String value) =>
+      value.replaceAll(RegExp(r'\s+'), ' ').trim().toLowerCase();
+
+  Future<void> _updateDcconFolder(_DcconFolderUpdate update) async {
+    if (_updatingDcconFolders.contains(update.folderName)) return;
+    setState(() => _updatingDcconFolders.add(update.folderName));
+    try {
+      final package = DcconPackage(
+        id: update.detail.package.id,
+        title: update.folderName,
+        seller: update.detail.package.seller,
+        thumbnailUrl: update.detail.package.thumbnailUrl,
+      );
+      final count = await _importDcconIcons(
+        package,
+        update.status.missingIcons,
+        catalogIcons: update.detail.icons,
+        existingIcons: update.status.installedIcons,
+      );
+      if (!mounted) return;
+      setState(() => _dcconFolderUpdates.remove(update.folderName));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('$count개 추가 디시콘 다운로드를 시작했습니다.')));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('디시콘 업데이트를 시작하지 못했습니다.')));
+    } finally {
+      if (mounted) {
+        setState(() => _updatingDcconFolders.remove(update.folderName));
+      }
+    }
   }
 
   Future<int> _importDcconIcons(
@@ -580,6 +743,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (version != _dcconCompletionVersion) {
           _dcconCompletionVersion = version;
           await _loadFolderData();
+          await _refreshDcconFolderUpdates();
         }
         if (active <= 0) {
           _dcconSyncTimer?.cancel();
@@ -1074,11 +1238,50 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     final items = folders[name] ?? const <String>[];
                     final count = items.length;
                     final isProtected = _isProtectedFolder(name);
+                    final dcconUpdate = type == FolderType.images
+                        ? _dcconFolderUpdates[name]
+                        : null;
+                    final isUpdating = _updatingDcconFolders.contains(name);
                     return ListTile(
                       key: ValueKey(name),
                       leading: _FolderPreview(type: type, items: items),
                       title: Text(name),
-                      subtitle: Text('항목 $count'),
+                      subtitle: dcconUpdate == null
+                          ? Text('항목 $count')
+                          : Row(
+                              children: [
+                                Text('항목 $count'),
+                                const SizedBox(width: 6),
+                                Flexible(
+                                  child: TextButton.icon(
+                                    onPressed: isUpdating
+                                        ? null
+                                        : () => _updateDcconFolder(dcconUpdate),
+                                    icon: isUpdating
+                                        ? const SizedBox.square(
+                                            dimension: 14,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          )
+                                        : const Icon(
+                                            Icons.system_update_alt,
+                                            size: 17,
+                                          ),
+                                    label: Text(
+                                      '업데이트 +${dcconUpdate.status.missingIcons.length}',
+                                    ),
+                                    style: TextButton.styleFrom(
+                                      minimumSize: const Size(0, 32),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                      ),
+                                      visualDensity: VisualDensity.compact,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
                       onTap: () => _openFolder(type, name),
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,

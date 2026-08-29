@@ -121,6 +121,16 @@ class DcconInstallStatus {
   final List<DcconIcon> missingIcons;
 }
 
+class DcconInstalledPackage {
+  const DcconInstalledPackage({
+    required this.package,
+    required this.folderName,
+  });
+
+  final DcconPackage package;
+  final String folderName;
+}
+
 class DcconInstallStore {
   static const String packagesPrefKey = 'dccon_packages';
   static const String imageFoldersPrefKey = 'image_folders';
@@ -138,6 +148,32 @@ class DcconInstallStore {
             (folders[folderName(package)]?.isNotEmpty ?? false))
           package.id,
     };
+  }
+
+  Future<List<DcconInstalledPackage>> installedPackages() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final records = _decodeRecords(prefs.getString(packagesPrefKey));
+    final folders = _decodeFolders(prefs.getString(imageFoldersPrefKey));
+    final result = <DcconInstalledPackage>[];
+    for (final entry in records.entries) {
+      final folder = entry.value['folderName']?.toString() ?? '';
+      final title = entry.value['title']?.toString() ?? folder;
+      if (entry.key.isEmpty || folder.isEmpty) continue;
+      if (!(folders[folder]?.isNotEmpty ?? false)) continue;
+      result.add(
+        DcconInstalledPackage(
+          package: DcconPackage(
+            id: entry.key,
+            title: title.isEmpty ? folder : title,
+            seller: '',
+            thumbnailUrl: '',
+          ),
+          folderName: folder,
+        ),
+      );
+    }
+    return result;
   }
 
   Future<DcconInstallStatus> statusFor(
@@ -199,6 +235,32 @@ class DcconInstallStore {
           .toList(),
       'updatedAt': DateTime.now().millisecondsSinceEpoch,
     };
+    await prefs.setString(packagesPrefKey, jsonEncode(records));
+  }
+
+  Future<void> renameFolder(String oldName, String newName) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final records = _decodeRecords(prefs.getString(packagesPrefKey));
+    var changed = false;
+    for (final record in records.values) {
+      if (record['folderName']?.toString() == oldName) {
+        record['folderName'] = newName;
+        changed = true;
+      }
+    }
+    if (changed) {
+      await prefs.setString(packagesPrefKey, jsonEncode(records));
+    }
+  }
+
+  Future<void> removeFolder(String folderName) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final records = _decodeRecords(prefs.getString(packagesPrefKey));
+    records.removeWhere(
+      (_, record) => record['folderName']?.toString() == folderName,
+    );
     await prefs.setString(packagesPrefKey, jsonEncode(records));
   }
 

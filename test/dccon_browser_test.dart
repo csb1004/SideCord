@@ -249,5 +249,48 @@ void main() {
       expect(status.installedIcons, icons);
       expect(status.missingIcons, isEmpty);
     });
+
+    test('tracks installed packages across folder rename and delete', () async {
+      SharedPreferences.setMockInitialValues({
+        'image_folders': jsonEncode({
+          '업데이트 테스트콘': ['one.png'],
+          '빈 폴더': <String>[],
+        }),
+        'dccon_packages': jsonEncode({
+          '42': {
+            'title': '업데이트 테스트콘',
+            'folderName': '업데이트 테스트콘',
+            'importedUrls': ['https://image/1'],
+          },
+          '99': {'title': '빈 폴더', 'folderName': '빈 폴더'},
+        }),
+      });
+      final store = DcconInstallStore();
+
+      final installed = await store.installedPackages();
+      expect(installed, hasLength(1));
+      expect(installed.single.package.id, '42');
+
+      await store.renameFolder('업데이트 테스트콘', '바꾼 폴더');
+      var records =
+          jsonDecode(
+                (await SharedPreferences.getInstance()).getString(
+                  DcconInstallStore.packagesPrefKey,
+                )!,
+              )
+              as Map<String, dynamic>;
+      expect(records['42']['folderName'], '바꾼 폴더');
+
+      await store.removeFolder('바꾼 폴더');
+      records =
+          jsonDecode(
+                (await SharedPreferences.getInstance()).getString(
+                  DcconInstallStore.packagesPrefKey,
+                )!,
+              )
+              as Map<String, dynamic>;
+      expect(records, isNot(contains('42')));
+      expect(records, contains('99'));
+    });
   });
 }
