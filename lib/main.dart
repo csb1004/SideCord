@@ -66,7 +66,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _dcconCompletionVersion = 0;
   final Map<String, _DcconFolderUpdate> _dcconFolderUpdates = {};
   final Set<String> _updatingDcconFolders = {};
+  final Set<String> _queuedDcconFolders = {};
   bool _checkingDcconUpdates = false;
+  bool _dcconUpdateRefreshPending = false;
   static const platform = MethodChannel('com.yourapp/overlay');
 
   @override
@@ -74,10 +76,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
 
-    _loadFolderData().then((_) {
+    _loadFolderData().then((_) async {
       if (mounted) {
         _initializeOverlay();
-        _refreshDcconFolderUpdates();
+        await _syncDcconDownloadStatus();
+        await _refreshDcconFolderUpdates();
       }
     });
   }
@@ -100,6 +103,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _reloadAfterResume() async {
     await _loadFolderData();
+    await _syncDcconDownloadStatus();
     _startDcconSyncPolling();
     await _refreshDcconFolderUpdates();
   }
@@ -503,7 +507,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _refreshDcconFolderUpdates() async {
-    if (_checkingDcconUpdates) return;
+    if (_checkingDcconUpdates) {
+      _dcconUpdateRefreshPending = true;
+      return;
+    }
     _checkingDcconUpdates = true;
     if (mounted) {
       setState(() => _dcconFolderUpdates.clear());
@@ -534,12 +541,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           );
           if (package == null) continue;
           final detail = await _dcconUpdateClient.loadDetail(package);
+          final localPackage = DcconPackage(
+            id: detail.package.id,
+            title: folderName,
+            seller: detail.package.seller,
+            thumbnailUrl: detail.package.thumbnailUrl,
+          );
           final status = await _dcconInstallStore.statusFor(
-            detail.package,
+            localPackage,
             detail.icons,
           );
           await _dcconInstallStore.recordImport(
-            detail.package,
+            localPackage,
             const [],
             catalogIcons: detail.icons,
             existingIcons: status.installedIcons,
@@ -549,8 +562,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           // Manually created folders do not need to match a dccon package.
         }
       }
+      await _loadFolderData();
     } finally {
       _checkingDcconUpdates = false;
+      if (_dcconUpdateRefreshPending) {
+        _dcconUpdateRefreshPending = false;
+        unawaited(_refreshDcconFolderUpdates());
+      }
     }
   }
 
@@ -576,6 +594,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!_imageFolders.containsKey(folderName)) return;
     setState(() {
       if (status.missingIcons.isEmpty) {
+        _dcconFolderUpdates.remove(folderName);
+      } else if (_queuedDcconFolders.contains(folderName)) {
         _dcconFolderUpdates.remove(folderName);
       } else {
         _dcconFolderUpdates[folderName] = _DcconFolderUpdate(
@@ -607,7 +627,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         existingIcons: update.status.installedIcons,
       );
       if (!mounted) return;
-      setState(() => _dcconFolderUpdates.remove(update.folderName));
+      setState(() {
+        _queuedDcconFolders.add(update.folderName);
+        _dcconFolderUpdates.remove(update.folderName);
+      });
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('$count개 추가 디시콘 다운로드를 시작했습니다.')));
@@ -734,9 +757,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _dcconSyncTimer?.cancel();
     _dcconSyncTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
       try {
-        final status = await platform.invokeMapMethod<String, dynamic>(
-          'getDcconDownloadStatus',
-        );
+        final status = await _syncDcconDownloadStatus();
         if (status == null) return;
         final active = (status['active'] as num?)?.toInt() ?? 0;
         final version = (status['completedVersion'] as num?)?.toInt() ?? 0;
@@ -754,6 +775,40 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _dcconSyncTimer = null;
       }
     });
+  }
+
+  Future<Map<String, dynamic>?> _syncDcconDownloadStatus() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return null;
+    Map<String, dynamic>? status;
+    try {
+      status = await platform.invokeMapMethod<String, dynamic>(
+        'getDcconDownloadStatus',
+      );
+    } catch (_) {
+      return null;
+    }
+    if (status == null) return null;
+    final rawQueued = status['queuedFolders']?.toString() ?? '[]';
+    Set<String> queued;
+    try {
+      final decoded = jsonDecode(rawQueued);
+      queued = decoded is List
+          ? decoded.map((item) => item.toString()).toSet()
+          : <String>{};
+    } catch (_) {
+      queued = <String>{};
+    }
+    if (mounted) {
+      setState(() {
+        _queuedDcconFolders
+          ..clear()
+          ..addAll(queued);
+        _dcconFolderUpdates.removeWhere(
+          (folderName, _) => queued.contains(folderName),
+        );
+      });
+    }
+    return status;
   }
 
   String _dcconIconProgressLabel(DcconIcon icon, int index) {
@@ -1242,11 +1297,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         ? _dcconFolderUpdates[name]
                         : null;
                     final isUpdating = _updatingDcconFolders.contains(name);
+                    final isQueued = _queuedDcconFolders.contains(name);
                     return ListTile(
                       key: ValueKey(name),
                       leading: _FolderPreview(type: type, items: items),
                       title: Text(name),
-                      subtitle: dcconUpdate == null
+                      subtitle: dcconUpdate == null || isQueued
                           ? Text('항목 $count')
                           : Row(
                               children: [

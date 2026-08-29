@@ -23,6 +23,7 @@ class DcconDownloadService : Service() {
         const val EXTRA_DATA = "data"
         const val PREF_ACTIVE = "flutter.dccon_download_active"
         const val PREF_COMPLETED_VERSION = "flutter.dccon_download_completed_version"
+        const val PREF_QUEUED_FOLDERS = "flutter.dccon_download_queued_folders"
         private const val PREFS_NAME = "FlutterSharedPreferences"
         private const val PREF_IMAGE_FOLDERS = "flutter.image_folders"
         private const val PREF_IMAGE_FOLDER_ORDER = "flutter.image_folder_order"
@@ -38,7 +39,10 @@ class DcconDownloadService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        prefs().edit().putInt(PREF_ACTIVE, 0).apply()
+        prefs().edit()
+            .putInt(PREF_ACTIVE, 0)
+            .putString(PREF_QUEUED_FOLDERS, "[]")
+            .apply()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -50,7 +54,10 @@ class DcconDownloadService : Service() {
             return START_NOT_STICKY
         }
 
+        val data = JSONObject(rawData)
+        val queuedFolder = data.optString("folderName", data.optString("title", "디시콘"))
         val active = pendingJobs.incrementAndGet()
+        addQueuedFolder(queuedFolder)
         prefs().edit().putInt(PREF_ACTIVE, active).apply()
         startForeground(
             NOTIFICATION_ID,
@@ -59,17 +66,12 @@ class DcconDownloadService : Service() {
 
         executor.execute {
             try {
-                downloadPackage(JSONObject(rawData))
+                downloadPackage(data)
             } catch (_: Exception) {
                 showFinishedNotification("디시콘 다운로드에 실패했습니다.")
             } finally {
                 val remaining = pendingJobs.decrementAndGet().coerceAtLeast(0)
-                val preferences = prefs()
-                val nextVersion = preferences.getInt(PREF_COMPLETED_VERSION, 0) + 1
-                preferences.edit()
-                    .putInt(PREF_ACTIVE, remaining)
-                    .putInt(PREF_COMPLETED_VERSION, nextVersion)
-                    .apply()
+                finishQueuedFolder(queuedFolder, remaining)
                 if (remaining == 0) {
                     stopForeground(STOP_FOREGROUND_DETACH)
                     stopSelf()
@@ -202,6 +204,7 @@ class DcconDownloadService : Service() {
                 .put("folderName", folderName)
                 .put("importedUrls", JSONArray(importedUrls.toList()))
                 .put("catalogUrls", JSONArray(catalogUrls.toList()))
+                .put("identityVersion", 2)
                 .put("updatedAt", System.currentTimeMillis()),
         )
 
@@ -216,6 +219,27 @@ class DcconDownloadService : Service() {
     private fun packageRecord(packageId: String): JSONObject {
         val packages = jsonObject(prefs().getString(PREF_DCCON_PACKAGES, null))
         return packages.optJSONObject(packageId) ?: JSONObject()
+    }
+
+    @Synchronized
+    private fun addQueuedFolder(folderName: String) {
+        val preferences = prefs()
+        val folders = jsonStringSet(jsonArray(preferences.getString(PREF_QUEUED_FOLDERS, null)))
+        folders.add(folderName)
+        preferences.edit().putString(PREF_QUEUED_FOLDERS, JSONArray(folders.toList()).toString()).commit()
+    }
+
+    @Synchronized
+    private fun finishQueuedFolder(folderName: String, remaining: Int) {
+        val preferences = prefs()
+        val folders = jsonStringSet(jsonArray(preferences.getString(PREF_QUEUED_FOLDERS, null)))
+        folders.remove(folderName)
+        val nextVersion = preferences.getInt(PREF_COMPLETED_VERSION, 0) + 1
+        preferences.edit()
+            .putString(PREF_QUEUED_FOLDERS, JSONArray(folders.toList()).toString())
+            .putInt(PREF_ACTIVE, remaining)
+            .putInt(PREF_COMPLETED_VERSION, nextVersion)
+            .commit()
     }
 
     private fun updateProgressNotification(title: String, completed: Int, total: Int, iconTitle: String) {

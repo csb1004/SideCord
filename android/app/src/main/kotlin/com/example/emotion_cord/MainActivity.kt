@@ -136,6 +136,10 @@ class MainActivity : FlutterActivity() {
 									DcconDownloadService.PREF_COMPLETED_VERSION,
 									0,
 								),
+								"queuedFolders" to prefs.getString(
+									DcconDownloadService.PREF_QUEUED_FOLDERS,
+									"[]",
+								),
 							),
 						)
 					}

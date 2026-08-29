@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:emotion_cord/dccon_browser.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -206,6 +207,12 @@ void main() {
           '42': {
             'folderName': '업데이트 테스트콘',
             'importedUrls': ['https://image/1', 'https://image/2'],
+            'catalogUrls': [
+              'https://image/1',
+              'https://image/2',
+              'https://image/3',
+            ],
+            'identityVersion': DcconInstallStore.identityVersion,
           },
         }),
       });
@@ -249,6 +256,83 @@ void main() {
       expect(status.installedIcons, icons);
       expect(status.missingIcons, isEmpty);
     });
+
+    test(
+      'reconciles shuffled catalogs by file content and removes duplicates',
+      () async {
+        final directory = await Directory.systemTemp.createTemp(
+          'sidecord_dccon_test_',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final first = File('${directory.path}/first.png');
+        final second = File('${directory.path}/second.png');
+        final duplicate = File('${directory.path}/duplicate.png');
+        await first.writeAsBytes([1, 2, 3]);
+        await second.writeAsBytes([4, 5, 6]);
+        await duplicate.writeAsBytes([1, 2, 3]);
+        const shuffledIcons = [
+          DcconIcon(
+            title: 'two',
+            imageUrl: 'https://image/2',
+            extension: 'png',
+          ),
+          DcconIcon(
+            title: 'new',
+            imageUrl: 'https://image/new',
+            extension: 'png',
+          ),
+          DcconIcon(
+            title: 'one',
+            imageUrl: 'https://image/1',
+            extension: 'png',
+          ),
+        ];
+        SharedPreferences.setMockInitialValues({
+          'image_folders': jsonEncode({
+            '업데이트 테스트콘': [first.path, second.path, duplicate.path],
+          }),
+          'dccon_packages': jsonEncode({
+            '42': {
+              'title': '업데이트 테스트콘',
+              'folderName': '업데이트 테스트콘',
+              'importedUrls': shuffledIcons
+                  .map((icon) => icon.imageUrl)
+                  .toList(),
+              'catalogUrls': shuffledIcons
+                  .map((icon) => icon.imageUrl)
+                  .toList(),
+            },
+          }),
+        });
+        final responseBytes = {
+          '/1': [1, 2, 3],
+          '/2': [4, 5, 6],
+          '/new': [7, 8, 9],
+        };
+        final store = DcconInstallStore(
+          verificationClient: MockClient((request) async {
+            return http.Response.bytes(responseBytes[request.url.path]!, 200);
+          }),
+        );
+
+        final status = await store.statusFor(package, shuffledIcons);
+
+        expect(status.installedIcons, [shuffledIcons[0], shuffledIcons[2]]);
+        expect(status.missingIcons, [shuffledIcons[1]]);
+        final prefs = await SharedPreferences.getInstance();
+        final folders = jsonDecode(prefs.getString('image_folders')!) as Map;
+        expect(folders['업데이트 테스트콘'], [first.path, second.path]);
+        final records = jsonDecode(prefs.getString('dccon_packages')!) as Map;
+        expect(
+          records['42']['identityVersion'],
+          DcconInstallStore.identityVersion,
+        );
+        expect(records['42']['importedUrls'], [
+          'https://image/2',
+          'https://image/1',
+        ]);
+      },
+    );
 
     test('tracks installed packages across folder rename and delete', () async {
       SharedPreferences.setMockInitialValues({

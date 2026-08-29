@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
@@ -132,8 +134,14 @@ class DcconInstalledPackage {
 }
 
 class DcconInstallStore {
+  DcconInstallStore({http.Client? verificationClient})
+    : _verificationClient = verificationClient;
+
   static const String packagesPrefKey = 'dccon_packages';
   static const String imageFoldersPrefKey = 'image_folders';
+  static const int identityVersion = 2;
+
+  final http.Client? _verificationClient;
 
   Future<Set<String>> findInstalledPackageIds(
     List<DcconPackage> packages,
@@ -189,11 +197,32 @@ class DcconInstallStore {
     final localPaths = folders[folder] ?? const <String>[];
     final recordedUrls = _stringList(record?['importedUrls']);
 
+    final hasVerifiedIdentity =
+        (record?['identityVersion'] as num?)?.toInt() == identityVersion;
+    if (!hasVerifiedIdentity && localPaths.isNotEmpty) {
+      final reconciled = await _reconcileByContent(
+        prefs: prefs,
+        records: records,
+        folders: folders,
+        package: package,
+        folder: folder,
+        localPaths: localPaths,
+        remoteIcons: remoteIcons,
+      );
+      if (reconciled != null) return reconciled;
+    }
+
     List<DcconIcon> installedIcons;
-    if (recordedUrls.isNotEmpty) {
+    final previousCatalogUrls = _stringList(record?['catalogUrls']);
+    final knownUrls = hasVerifiedIdentity
+        ? recordedUrls
+        : previousCatalogUrls.isNotEmpty
+        ? previousCatalogUrls
+        : recordedUrls;
+    if (knownUrls.isNotEmpty) {
       installedIcons = [
         for (final icon in remoteIcons)
-          if (recordedUrls.contains(icon.imageUrl)) icon,
+          if (knownUrls.contains(icon.imageUrl)) icon,
       ];
     } else {
       final legacyCount = localPaths.length.clamp(0, remoteIcons.length);
@@ -233,6 +262,7 @@ class DcconInstallStore {
       'catalogUrls': (catalogIcons ?? const <DcconIcon>[])
           .map((icon) => icon.imageUrl)
           .toList(),
+      'identityVersion': identityVersion,
       'updatedAt': DateTime.now().millisecondsSinceEpoch,
     };
     await prefs.setString(packagesPrefKey, jsonEncode(records));
@@ -305,6 +335,119 @@ class DcconInstallStore {
   List<String> _stringList(Object? value) {
     if (value is! List) return const [];
     return value.map((item) => item.toString()).toList();
+  }
+
+  Future<DcconInstallStatus?> _reconcileByContent({
+    required SharedPreferences prefs,
+    required Map<String, Map<String, dynamic>> records,
+    required Map<String, List<String>> folders,
+    required DcconPackage package,
+    required String folder,
+    required List<String> localPaths,
+    required List<DcconIcon> remoteIcons,
+  }) async {
+    final existingFiles = [
+      for (final path in localPaths)
+        if (File(path).existsSync()) File(path),
+    ];
+    if (existingFiles.isEmpty || remoteIcons.isEmpty) return null;
+
+    try {
+      final localDigests = await Future.wait(
+        existingFiles.map((file) async {
+          final digest = sha256.convert(await file.readAsBytes()).toString();
+          return (path: file.path, digest: digest);
+        }),
+      );
+
+      final client = _verificationClient ?? http.Client();
+      final ownsClient = _verificationClient == null;
+      final remoteDigests = <String, String>{};
+      try {
+        const batchSize = 8;
+        for (var start = 0; start < remoteIcons.length; start += batchSize) {
+          final batch = remoteIcons.skip(start).take(batchSize);
+          final results = await Future.wait(
+            batch.map((icon) async {
+              final response = await client.get(
+                Uri.parse(icon.imageUrl),
+                headers: DcconClient.imageHeaders,
+              );
+              if (response.statusCode < 200 ||
+                  response.statusCode >= 300 ||
+                  response.bodyBytes.isEmpty) {
+                throw HttpException('Cannot verify ${icon.imageUrl}');
+              }
+              return (
+                url: icon.imageUrl,
+                digest: sha256.convert(response.bodyBytes).toString(),
+              );
+            }),
+          );
+          for (final result in results) {
+            remoteDigests[result.url] = result.digest;
+          }
+        }
+      } finally {
+        if (ownsClient) client.close();
+      }
+
+      final availableCounts = <String, int>{};
+      for (final item in localDigests) {
+        availableCounts.update(
+          item.digest,
+          (count) => count + 1,
+          ifAbsent: () => 1,
+        );
+      }
+      final usedCounts = <String, int>{};
+      final installedIcons = <DcconIcon>[];
+      for (final icon in remoteIcons) {
+        final digest = remoteDigests[icon.imageUrl]!;
+        final used = usedCounts[digest] ?? 0;
+        if (used < (availableCounts[digest] ?? 0)) {
+          installedIcons.add(icon);
+          usedCounts[digest] = used + 1;
+        }
+      }
+
+      final remoteCounts = <String, int>{};
+      for (final digest in remoteDigests.values) {
+        remoteCounts.update(digest, (count) => count + 1, ifAbsent: () => 1);
+      }
+      final retainedCounts = <String, int>{};
+      final retainedPaths = <String>[];
+      for (final item in localDigests) {
+        final remoteCount = remoteCounts[item.digest] ?? 0;
+        final retained = retainedCounts[item.digest] ?? 0;
+        if (remoteCount == 0 || retained < remoteCount) {
+          retainedPaths.add(item.path);
+          retainedCounts[item.digest] = retained + 1;
+        }
+      }
+      final installedUrls = installedIcons.map((icon) => icon.imageUrl).toSet();
+      folders[folder] = retainedPaths;
+      records[package.id] = {
+        'title': package.title,
+        'folderName': folder,
+        'importedUrls': installedUrls.toList(),
+        'catalogUrls': remoteIcons.map((icon) => icon.imageUrl).toList(),
+        'identityVersion': identityVersion,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      };
+      await prefs.setString(imageFoldersPrefKey, jsonEncode(folders));
+      await prefs.setString(packagesPrefKey, jsonEncode(records));
+      return DcconInstallStatus(
+        installed: installedIcons.isNotEmpty,
+        installedIcons: installedIcons,
+        missingIcons: [
+          for (final icon in remoteIcons)
+            if (!installedUrls.contains(icon.imageUrl)) icon,
+        ],
+      );
+    } catch (_) {
+      return null;
+    }
   }
 }
 
